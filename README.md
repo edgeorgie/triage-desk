@@ -88,6 +88,13 @@ Motion, components and rationale: [docs/design-system.md](docs/design-system.md)
 - Token overlap misses paraphrased duplicates.
 - The agent never writes to GitHub.
 
+## Deployment
+
+The app is fully client-side, so it can be hosted as static files.
+
+- **GitHub Pages:** `npm run deploy:pages` builds a static export and publishes it to the `gh-pages` branch. Enable Pages from that branch; on a free plan the repository must be public.
+- **Vercel or any Node host:** use the Deploy button above. No configuration is needed.
+
 ## Documentation
 
 | Document | What it answers |
