@@ -1,0 +1,92 @@
+[
+  {
+    "id": "FR-1",
+    "title": "Tool-use loop",
+    "status": "Verified",
+    "acceptance": [
+      "Given a scripted model, then tools run in order, results are fed back, and the loop ends when a ruling is submitted.",
+      "Given an invalid ruling, then the validation error is returned and the model may retry.",
+      "Given no decision within the step budget, then a clear error is raised."
+    ],
+    "implementation": [
+      "lib/agent.ts",
+      "lib/tools.ts"
+    ],
+    "tests": [
+      "tests/agent.test.ts"
+    ],
+    "evidence": "PR 1: loop tests with a scripted model."
+  },
+  {
+    "id": "FR-2",
+    "title": "Provider adapters",
+    "status": "Implemented, not verified end to end",
+    "acceptance": [
+      "Given Anthropic or OpenAI, then tool calls and tool results are encoded in each provider's format."
+    ],
+    "implementation": [
+      "lib/agent.ts"
+    ],
+    "tests": [],
+    "evidence": "manual: PR 3, scripted Anthropic responses in Chrome exercised two model calls with tool results appended. OpenAI not exercised."
+  },
+  {
+    "id": "FR-3",
+    "title": "Duplicate detection",
+    "status": "Verified",
+    "acceptance": [
+      "Given an issue and the open pool, then similar issues are ranked and unrelated ones excluded."
+    ],
+    "implementation": [
+      "lib/similar.ts",
+      "lib/tools.ts"
+    ],
+    "tests": [
+      "tests/agent.test.ts"
+    ],
+    "evidence": "PR 1: similarity test."
+  },
+  {
+    "id": "FR-4",
+    "title": "Ruling validation",
+    "status": "Verified",
+    "acceptance": [
+      "Given model output, then kind, priority, summary and reply are required, confidence is clamped, and unknown values are rejected."
+    ],
+    "implementation": [
+      "lib/triage.ts"
+    ],
+    "tests": [
+      "tests/agent.test.ts"
+    ],
+    "evidence": "PR 1: validation tests."
+  },
+  {
+    "id": "FR-5",
+    "title": "Auditable ledger and ruling view",
+    "status": "Verified",
+    "acceptance": [
+      "Given a run, then each completed tool call appears on a timeline and the ruling shows kind, priority, labels, duplicate, missing information and a copyable reply."
+    ],
+    "implementation": [
+      "components/Ledger.tsx",
+      "components/Ruling.tsx",
+      "app/page.tsx"
+    ],
+    "tests": [],
+    "evidence": "manual: PR 3, rendered in Chrome with a scripted model."
+  },
+  {
+    "id": "FR-6",
+    "title": "Keyboard, batch and export",
+    "status": "Verified",
+    "acceptance": [
+      "Given the list, then J/K move, R rules, B triages the next five in sequence, C copies the reply, and all rulings export as JSON."
+    ],
+    "implementation": [
+      "app/page.tsx"
+    ],
+    "tests": [],
+    "evidence": "manual: PR 4, verified against zod with a scripted model: five calls, five priority marks, export shown."
+  }
+]

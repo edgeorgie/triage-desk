@@ -35,3 +35,8 @@ This repository is developed with AI assistance under spec-driven development. T
 | `docs/spec/traceability.md` | Requirement to code, test and evidence |
 | `docs/adr/` | Decision records |
 | `scripts/check-spec.mjs` | Traceability gate |
+| `docs/architecture.md` | Diagrams and modules |
+| `docs/design-system.md` | Tokens, motion, components |
+| `docs/glossary.md` | Definitions |
+| `docs/evaluation.md` | Self-assessment |
+| `public/llms.txt` | Pointer file for LLM tools |
