@@ -86,12 +86,50 @@
     "title": "Keyboard, batch and export",
     "status": "Verified",
     "acceptance": [
-      "Given the list, then J/K move, R rules, B triages the next five in sequence, C copies the reply, and all rulings export as JSON."
+      "Given the list, then J/K move, R rules, B triages the next five in sequence, C copies the reply, and all rulings export as JSON.",
+      "Given a run in progress, when R, B or Enter is pressed, then no second run starts.",
+      "Given a focused button or link, when Enter is pressed, then the control activates natively and the shortcut does not fire."
     ],
     "implementation": [
+      "app/page.tsx",
+      "lib/keys.ts"
+    ],
+    "tests": [
+      "tests/keys.test.ts"
+    ],
+    "evidence": "manual: PR 4, verified against zod with a scripted model: five calls, five priority marks, export shown."
+  },
+  {
+    "id": "FR-7",
+    "title": "Provider key kept in the session by default",
+    "status": "Verified",
+    "acceptance": [
+      "Given a provider key, then it is kept in sessionStorage for the tab by default, kept on the device only when the user ticks \"Remember on this device\", and removable with \"Clear key\"; the provider choice persists."
+    ],
+    "implementation": [
+      "lib/keystore.ts",
+      "components/KeyNotes.tsx",
       "app/page.tsx"
     ],
-    "tests": [],
-    "evidence": "manual: PR 4, verified against zod with a scripted model: five calls, five priority marks, export shown."
+    "tests": [
+      "tests/keystore.test.ts"
+    ],
+    "evidence": "In Chrome with an invalid test key the key stayed in sessionStorage (SEC-002)."
+  },
+  {
+    "id": "FR-8",
+    "title": "Content Security Policy on the static export",
+    "status": "Verified",
+    "acceptance": [
+      "Given the Pages export, then every page carries a Content-Security-Policy meta tag that allows scripts only from the site and from the hashes of its inline scripts, and connections only to the site, api.anthropic.com, api.openai.com, api.github.com and raw.githubusercontent.com."
+    ],
+    "implementation": [
+      "scripts/csp.mjs",
+      "scripts/deploy-pages.mjs"
+    ],
+    "tests": [
+      "tests/csp.test.ts"
+    ],
+    "evidence": "Hash and policy tests; published site checked in Chrome after deploy (SEC-001)."
   }
 ]

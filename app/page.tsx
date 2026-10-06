@@ -1,23 +1,53 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import KeyNotes from "@/components/KeyNotes";
 import Ledger from "@/components/Ledger";
 import Ruling from "@/components/Ruling";
 import { PROVIDERS, SYSTEM_PROMPT, createAdapter, runAgent, userPrompt } from "@/lib/agent";
 import type { Provider, Step } from "@/lib/agent";
+import { handlesOwnKeys } from "@/lib/keys";
+import { clearKeys, readKeys, writeKeys } from "@/lib/keystore";
 import { listIssues, parseRepo } from "@/lib/github";
 import type { Issue } from "@/lib/github";
 import type { TriageResult } from "@/lib/triage";
 
 const STORE = "triage-desk.llm";
+const KEY = "triage-desk.llm.key";
 const EXAMPLES = ["sindresorhus/ky", "pmndrs/zustand", "colinhacks/zod"];
+const HOSTS: Record<Provider, string> = { anthropic: "api.anthropic.com", openai: "api.openai.com" };
 
-function loadSettings(): { provider: Provider; key: string } {
+interface Settings {
+  provider: Provider;
+  key: string;
+  remember: boolean;
+}
+
+function loadSettings(): Settings {
+  const settings: Settings = { provider: "anthropic", key: "", remember: false };
   try {
     const raw = localStorage.getItem(STORE);
-    if (raw) return JSON.parse(raw) as { provider: Provider; key: string };
+    if (raw) {
+      const stored = JSON.parse(raw) as { provider?: Provider; key?: string };
+      if (stored.provider) settings.provider = stored.provider;
+      if (stored.key) {
+        sessionStorage.setItem(KEY, JSON.stringify({ key: stored.key }));
+        localStorage.setItem(STORE, JSON.stringify({ provider: settings.provider }));
+      }
+    }
+    const keys = readKeys<{ key: string }>(KEY, sessionStorage, localStorage);
+    settings.key = keys.value?.key ?? "";
+    settings.remember = keys.remember;
   } catch {}
-  return { provider: "anthropic", key: "" };
+  return settings;
+}
+
+function persistSettings(next: Settings) {
+  try {
+    localStorage.setItem(STORE, JSON.stringify({ provider: next.provider }));
+    if (next.key) writeKeys(KEY, { key: next.key }, next.remember, sessionStorage, localStorage);
+    else clearKeys(KEY, sessionStorage, localStorage);
+  } catch {}
 }
 
 function ageDays(iso: string): number {
@@ -38,22 +68,21 @@ export default function Home() {
   const [selected, setSelected] = useState<Issue | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [settings, setSettings] = useState<{ provider: Provider; key: string }>({ provider: "anthropic", key: "" });
+  const [settings, setSettings] = useState<Settings>({ provider: "anthropic", key: "", remember: false });
   const [keyOpen, setKeyOpen] = useState(false);
   const [steps, setSteps] = useState<Step[]>([]);
   const [running, setRunning] = useState(false);
   const [rulings, setRulings] = useState<Record<number, TriageResult>>({});
   const abort = useRef<AbortController | null>(null);
+  const runningRef = useRef(false);
 
   useEffect(() => {
     Promise.resolve().then(() => setSettings(loadSettings()));
   }, []);
 
-  const saveSettings = (next: { provider: Provider; key: string }) => {
+  const saveSettings = (next: Settings) => {
     setSettings(next);
-    try {
-      localStorage.setItem(STORE, JSON.stringify(next));
-    } catch {}
+    persistSettings(next);
   };
 
   const load = async (value: string) => {
@@ -81,6 +110,7 @@ export default function Home() {
 
   const pick = (issue: Issue) => {
     abort.current?.abort();
+    runningRef.current = false;
     setRunning(false);
     setSelected(issue);
     setSteps([]);
@@ -88,7 +118,7 @@ export default function Home() {
   };
 
   const ruleIssue = async (target: Issue): Promise<boolean> => {
-    if (!repo) return false;
+    if (!repo || runningRef.current) return false;
     if (!settings.key) {
       setKeyOpen(true);
       setError("Add your API key first (top right).");
@@ -96,6 +126,7 @@ export default function Home() {
     }
     setError("");
     setSteps([]);
+    runningRef.current = true;
     setRunning(true);
     const controller = new AbortController();
     abort.current = controller;
@@ -120,7 +151,10 @@ export default function Home() {
       if (!(e instanceof DOMException && e.name === "AbortError")) setError(e instanceof Error ? e.message : "The agent failed.");
       return false;
     } finally {
-      setRunning(false);
+      if (abort.current === controller) {
+        runningRef.current = false;
+        setRunning(false);
+      }
     }
   };
 
@@ -130,7 +164,7 @@ export default function Home() {
 
   const [batch, setBatch] = useState<{ done: number; total: number } | null>(null);
   const ruleBatch = async () => {
-    if (!selected || batch) return;
+    if (!selected || batch || runningRef.current) return;
     const start = issues.findIndex((i) => i.number === selected.number);
     const targets = issues.slice(start, start + 5);
     for (let n = 0; n < targets.length; n++) {
@@ -152,8 +186,10 @@ export default function Home() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
+      const el = e.target as HTMLElement;
+      const tag = el.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "Enter" && handlesOwnKeys(tag, el.getAttribute("role"), el.isContentEditable)) return;
       if (e.key === "?") setHelp((h) => !h);
       else if (e.key === "Escape") setHelp(false);
       else if (e.key === "j" || e.key === "ArrowDown") {
@@ -205,8 +241,10 @@ export default function Home() {
               {settings.key ? `${PROVIDERS[settings.provider].label} key set` : "Add API key"}
             </button>
             {keyOpen && (
-              <div className="pop absolute right-0 z-10 mt-3 w-72 rounded-3xl border-2 border-ink bg-card p-4 shadow-xl">
-                <p className="mb-3 text-xs text-ink-soft">Stays in this browser. Requests go straight to the provider.</p>
+              <div className="pop absolute right-0 z-10 mt-3 w-80 max-w-[calc(100vw-2rem)] rounded-3xl border-2 border-ink bg-card p-4 shadow-xl">
+                <div className="mb-3">
+                  <KeyNotes host={HOSTS[settings.provider]} remember={settings.remember} hasKey={Boolean(settings.key)} onRemember={(remember) => saveSettings({ ...settings, remember })} onClear={() => saveSettings({ ...settings, key: "" })} />
+                </div>
                 <select
                   value={settings.provider}
                   onChange={(e) => saveSettings({ ...settings, provider: e.target.value as Provider })}
