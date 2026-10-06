@@ -50,3 +50,14 @@ test("tool outputs that carry third-party text are marked untrusted", async () =
   ];
   for (const out of outs) assert.match(out.output, /^<untrusted_issue>/);
 });
+
+test("parseRepo accepts the common forms and rejects dot segments", async () => {
+  const { parseRepo } = await import("../lib/github.ts");
+  const want = { owner: "sindresorhus", repo: "ky" };
+  for (const ok of ["sindresorhus/ky", "sindresorhus/ky/", "github.com/sindresorhus/ky", "www.github.com/sindresorhus/ky", "https://github.com/sindresorhus/ky/issues/5", "https://www.github.com/sindresorhus/ky.git", " sindresorhus/ky "]) {
+    assert.deepEqual(parseRepo(ok), want, ok);
+  }
+  for (const bad of ["../x", "x/..", "..", "a/b/c", "https://evil.com/sindresorhus/ky", "https://github.com.evil.com/a/b", "", "nope"]) {
+    assert.equal(parseRepo(bad), null, bad);
+  }
+});
