@@ -31,7 +31,7 @@ export const TRIAGE_SCHEMA = {
 } as const;
 
 /** Validates the submit_triage payload from the model. Returns an error string if it is unusable. */
-export function parseTriage(input: unknown): TriageResult | string {
+export function parseTriage(input: unknown, knownIssues?: number[]): TriageResult | string {
   if (typeof input !== "object" || input === null) return "Input must be an object.";
   const o = input as Record<string, unknown>;
   if (!KINDS.includes(o.kind as Kind)) return `kind must be one of ${KINDS.join(", ")}.`;
@@ -39,16 +39,21 @@ export function parseTriage(input: unknown): TriageResult | string {
   if (typeof o.summary !== "string" || !o.summary.trim()) return "summary is required.";
   if (typeof o.reply !== "string" || !o.reply.trim()) return "reply is required.";
   const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 8) : []);
-  const dup = typeof o.duplicate_of === "number" && Number.isInteger(o.duplicate_of) ? o.duplicate_of : null;
+  let dup: number | null = null;
+  if (o.duplicate_of !== undefined && o.duplicate_of !== null) {
+    if (typeof o.duplicate_of !== "number" || !Number.isInteger(o.duplicate_of) || o.duplicate_of < 1) return "duplicate_of must be a positive issue number or null.";
+    if (knownIssues && !knownIssues.includes(o.duplicate_of)) return "duplicate_of must be the number of an open issue from this repository or null.";
+    dup = o.duplicate_of;
+  }
   const conf = typeof o.confidence === "number" ? Math.min(1, Math.max(0, o.confidence)) : 0.5;
   return {
     kind: o.kind as Kind,
     priority: o.priority as Priority,
     labels: strings(o.labels),
     duplicateOf: dup,
-    summary: o.summary.trim(),
+    summary: o.summary.trim().slice(0, 600),
     needsInfo: strings(o.needs_info),
-    reply: o.reply.trim(),
+    reply: o.reply.trim().slice(0, 2000),
     confidence: conf,
   };
 }

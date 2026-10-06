@@ -52,6 +52,16 @@ export interface ToolOutcome {
   isError?: boolean;
 }
 
+const SAFE_PATH = /^[\w][\w.\-/]{0,200}$/;
+
+export function isSafeRepoPath(path: string): boolean {
+  return SAFE_PATH.test(path) && !path.split("/").some((s) => s === "" || s === "." || s === "..");
+}
+
+export function untrusted(text: string): string {
+  return `<untrusted_issue>\n${text.replaceAll("</untrusted_issue>", "")}\n</untrusted_issue>`;
+}
+
 export function labelCounts(pool: Issue[]): [string, number][] {
   const counts = new Map<string, number>();
   for (const i of pool) for (const l of i.labels) counts.set(l, (counts.get(l) ?? 0) + 1);
@@ -64,24 +74,24 @@ export async function executeTool(name: string, input: unknown, ctx: ToolContext
     case "get_issue": {
       const issue = ctx.pool.find((i) => i.number === args.number);
       if (!issue) return { output: `Issue #${String(args.number)} is not among the loaded open issues.`, isError: true };
-      return { output: JSON.stringify({ number: issue.number, title: issue.title, labels: issue.labels, comments: issue.comments, body: issue.body.slice(0, 1500) }) };
+      return { output: untrusted(JSON.stringify({ number: issue.number, title: issue.title, labels: issue.labels, comments: issue.comments, body: issue.body.slice(0, 1500) })) };
     }
     case "find_similar":
-      return { output: JSON.stringify(findSimilar(ctx.target, ctx.pool)) };
+      return { output: untrusted(JSON.stringify(findSimilar(ctx.target, ctx.pool))) };
     case "list_labels":
       return { output: JSON.stringify(labelCounts(ctx.pool).slice(0, 25)) };
     case "read_repo_file": {
       const path = String(args.path ?? "");
-      if (!path || path.includes("..")) return { output: "Invalid path.", isError: true };
+      if (!isSafeRepoPath(path)) return { output: "Invalid path.", isError: true };
       try {
         const read = ctx.readFile ?? ((p: string) => readRepoFile(ctx.owner, ctx.repo, p));
-        return { output: await read(path) };
+        return { output: untrusted(await read(path)) };
       } catch (e) {
         return { output: e instanceof Error ? e.message : "Could not read the file.", isError: true };
       }
     }
     case "submit_triage": {
-      const parsed = parseTriage(input);
+      const parsed = parseTriage(input, ctx.pool.map((i) => i.number));
       if (typeof parsed === "string") return { output: `Invalid triage: ${parsed} Fix it and call submit_triage again.`, isError: true };
       return { output: "Triage recorded.", result: parsed };
     }
