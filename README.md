@@ -37,3 +37,8 @@ Open http://localhost:3000.
 ## License
 
 MIT
+
+## Keyboard and batches
+
+- `J` / `K` move through the issues, `R` or `Enter` rules on the selected one, `C` copies its suggested reply, `?` shows the shortcuts.
+- `B` triages the next 5 issues in a row, then you can export every ruling as JSON.
