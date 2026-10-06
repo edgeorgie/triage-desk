@@ -39,7 +39,7 @@ test("tools: get_issue, labels, read file, path guard", async () => {
   assert.ok((await executeTool("get_issue", { number: 2 }, ctx)).output.includes("dark mode"));
   assert.equal((await executeTool("get_issue", { number: 99 }, ctx)).isError, true);
   assert.deepEqual(labelCounts(pool)[0], ["bug", 2]);
-  assert.equal((await executeTool("read_repo_file", { path: "README.md" }, ctx)).output, "content of README.md");
+  assert.ok((await executeTool("read_repo_file", { path: "README.md" }, ctx)).output.includes("content of README.md"));
   assert.equal((await executeTool("read_repo_file", { path: "../secret" }, ctx)).isError, true);
   assert.equal((await executeTool("nope", {}, ctx)).isError, true);
 });

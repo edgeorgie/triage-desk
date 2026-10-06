@@ -56,7 +56,11 @@ export async function listIssues(owner: string, repo: string, perPage = 40): Pro
 }
 
 export async function readRepoFile(owner: string, repo: string, path: string): Promise<string> {
-  const res = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${path.replace(/^\/+/, "")}`);
+  const url = new URL(`https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/HEAD/${path.replace(/^\/+/, "")}`);
+  if (url.origin !== "https://raw.githubusercontent.com" || !url.pathname.startsWith(`/${owner}/${repo}/HEAD/`) || url.search || url.hash) {
+    throw new Error(`Invalid path: ${path}`);
+  }
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`File not found: ${path}`);
   return (await res.text()).slice(0, 6000);
 }

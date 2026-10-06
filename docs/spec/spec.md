@@ -47,7 +47,8 @@ Status: Verified.
 
 Status: Verified.
 
-- Given model output, then kind, priority, summary and reply are required, confidence is clamped, and unknown values are rejected.
+- Given model output, then kind, priority, summary and reply are required, confidence is clamped, and unknown values are rejected, `duplicate_of` must be a loaded open issue, and summary and reply are length-limited.
+- Given issue text or file contents, then they reach the model delimited as untrusted data, and `read_repo_file` accepts only plain relative paths (no dot segments, encoded or not).
 
 ### FR-5 Auditable ledger and ruling view
 
