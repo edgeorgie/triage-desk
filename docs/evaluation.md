@@ -15,7 +15,7 @@ A self-assessment against a reviewer's rubric. It states gaps plainly so a revie
 | Privacy and data flow | Pass | Every data path and its storage is tabulated in the README. |
 | Accessibility | Partial | Shortcuts are documented in a dialog and every action has a button; the timeline is an ordered list. Not audited with automated tooling. |
 | Performance | Partial | Each ruling is a few sequential model calls. Not measured with Lighthouse. |
-| Security | Partial | The key lives in localStorage. No Content Security Policy is configured. |
+| Security | Partial | The key lives in localStorage. Baseline security headers are set (nosniff, frame denial, referrer and permissions policies). No Content Security Policy is configured. |
 | Deployment | Gap | Not deployed yet. A Vercel deploy button is in the README. |
 | Licensing | Pass | MIT. |
 
