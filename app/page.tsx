@@ -87,19 +87,18 @@ export default function Home() {
     setError("");
   };
 
-  const rule = async () => {
-    if (!repo || !selected) return;
+  const ruleIssue = async (target: Issue): Promise<boolean> => {
+    if (!repo) return false;
     if (!settings.key) {
       setKeyOpen(true);
       setError("Add your API key first (top right).");
-      return;
+      return false;
     }
     setError("");
     setSteps([]);
     setRunning(true);
     const controller = new AbortController();
     abort.current = controller;
-    const target = selected;
     try {
       const adapter = createAdapter(settings.provider, settings.key, SYSTEM_PROMPT, userPrompt(`${repo.owner}/${repo.repo}`, target));
       const result = await runAgent({
@@ -116,13 +115,77 @@ export default function Home() {
         signal: controller.signal,
       });
       setRulings((r) => ({ ...r, [target.number]: result }));
+      return true;
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) setError(e instanceof Error ? e.message : "The agent failed.");
+      return false;
     } finally {
       setRunning(false);
     }
   };
 
+  const rule = () => {
+    if (selected) void ruleIssue(selected);
+  };
+
+  const [batch, setBatch] = useState<{ done: number; total: number } | null>(null);
+  const ruleBatch = async () => {
+    if (!selected || batch) return;
+    const start = issues.findIndex((i) => i.number === selected.number);
+    const targets = issues.slice(start, start + 5);
+    for (let n = 0; n < targets.length; n++) {
+      setBatch({ done: n, total: targets.length });
+      setSelected(targets[n]);
+      const ok = await ruleIssue(targets[n]);
+      if (!ok) break;
+    }
+    setBatch(null);
+  };
+
+  const [help, setHelp] = useState(false);
+  const move = (delta: number) => {
+    if (!selected || running) return;
+    const i = issues.findIndex((x) => x.number === selected.number);
+    const next = issues[Math.min(issues.length - 1, Math.max(0, i + delta))];
+    if (next) pick(next);
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "?") setHelp((h) => !h);
+      else if (e.key === "Escape") setHelp(false);
+      else if (e.key === "j" || e.key === "ArrowDown") {
+        e.preventDefault();
+        move(1);
+      } else if (e.key === "k" || e.key === "ArrowUp") {
+        e.preventDefault();
+        move(-1);
+      } else if (e.key === "r" || e.key === "Enter") {
+        e.preventDefault();
+        rule();
+      } else if (e.key === "b") void ruleBatch();
+      else if (e.key === "c") {
+        const r = selected ? rulings[selected.number] : undefined;
+        if (r) navigator.clipboard?.writeText(r.reply);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  const exportRulings = () => {
+    const rows = issues.filter((i) => rulings[i.number]).map((i) => ({ issue: i.number, title: i.title, url: i.url, ...rulings[i.number] }));
+    const url = URL.createObjectURL(new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${repo?.repo ?? "triage"}-rulings.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const ruled = Object.keys(rulings).length;
   const ruling = selected ? rulings[selected.number] : undefined;
 
   return (
@@ -258,14 +321,28 @@ export default function Home() {
                 Open on GitHub
               </a>
 
-              <div className="mt-8">
+              <div className="mt-8 flex flex-wrap items-center gap-3">
                 <button
                   onClick={rule}
                   disabled={running}
                   className={`rounded-full bg-tangerine px-8 py-4 text-base font-bold text-white shadow-lg shadow-tangerine/30 transition hover:-translate-y-0.5 hover:shadow-xl active:scale-95 disabled:opacity-70 ${running ? "pulse-ring" : ""}`}
                 >
                   {running ? "Investigating..." : ruling ? "Rule again" : "Rule on this issue"}
+                  <kbd className="ml-3 rounded-md bg-white/25 px-1.5 py-0.5 font-mono text-xs">R</kbd>
                 </button>
+                <button
+                  onClick={() => void ruleBatch()}
+                  disabled={running || batch !== null}
+                  className="rounded-full border-2 border-ink px-6 py-3.5 text-sm font-bold transition hover:-translate-y-0.5 hover:bg-card active:scale-95 disabled:opacity-50"
+                >
+                  {batch ? `Ruling ${batch.done + 1} of ${batch.total}...` : "Triage the next 5"}
+                  <kbd className="ml-3 rounded-md bg-ink/10 px-1.5 py-0.5 font-mono text-xs">B</kbd>
+                </button>
+                {ruled > 0 && (
+                  <button onClick={exportRulings} className="text-sm font-semibold underline decoration-tangerine decoration-2 underline-offset-4 hover:text-tangerine">
+                    Export {ruled} ruling{ruled === 1 ? "" : "s"}
+                  </button>
+                )}
               </div>
 
               {(steps.length > 0 || running) && (
@@ -283,6 +360,25 @@ export default function Home() {
           </div>
         )}
       </main>
+
+      <button onClick={() => setHelp(true)} className="fixed bottom-5 right-5 grid h-11 w-11 place-items-center rounded-full border-2 border-ink bg-lemon font-bold shadow-[3px_3px_0_0_var(--ink)] transition hover:-translate-y-0.5" aria-label="Keyboard shortcuts">
+        ?
+      </button>
+      {help && (
+        <div className="fixed inset-0 z-40 grid place-items-center bg-ink/40 p-6" onClick={() => setHelp(false)}>
+          <div className="pop w-full max-w-sm rounded-[2rem] border-2 border-ink bg-card p-7 shadow-[8px_8px_0_0_var(--ink)]" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Keyboard shortcuts">
+            <h3 className="display text-2xl font-bold">Keyboard</h3>
+            <dl className="mt-5 space-y-3 text-[15px]">
+              {[["J / K", "Next / previous issue"], ["R or Enter", "Rule on this issue"], ["B", "Triage the next 5"], ["C", "Copy the suggested reply"], ["?", "Show or hide this"]].map(([k, d]) => (
+                <div key={k} className="flex items-center justify-between gap-4">
+                  <dt><kbd className="rounded-lg bg-ink px-2 py-1 font-mono text-xs text-cream">{k}</kbd></dt>
+                  <dd className="text-ink-soft">{d}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
