@@ -16,7 +16,7 @@ A self-assessment against a reviewer's rubric. It states gaps plainly so a revie
 | Accessibility | Partial | Shortcuts are documented in a dialog and every action has a button; the timeline is an ordered list. Not audited with automated tooling. |
 | Performance | Partial | Each ruling is a few sequential model calls. Not measured with Lighthouse. |
 | Security | Partial | The key lives in localStorage. Baseline security headers are set (nosniff, frame denial, referrer and permissions policies). No Content Security Policy is configured. |
-| Deployment | Gap | Not deployed yet. A Vercel deploy button is in the README. |
+| Deployment | Pass | Live on GitHub Pages at https://edgeorgie.github.io/triage-desk/. The deployed build was loaded in a browser and its main flow was exercised. |
 | Licensing | Pass | MIT. |
 
 ## Verify it yourself
