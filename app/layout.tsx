@@ -1,19 +1,19 @@
 import type { Metadata } from "next";
-import { Instrument_Serif, JetBrains_Mono, Hanken_Grotesk } from "next/font/google";
+import { JetBrains_Mono, Onest, Syne } from "next/font/google";
 import "./globals.css";
 
-const serif = Instrument_Serif({ variable: "--font-serif", subsets: ["latin"], weight: "400", style: ["normal", "italic"] });
+const display = Syne({ variable: "--font-display", subsets: ["latin"], weight: ["600", "700", "800"] });
+const body = Onest({ variable: "--font-body", subsets: ["latin"] });
 const mono = JetBrains_Mono({ variable: "--font-mono", subsets: ["latin"] });
-const sans = Hanken_Grotesk({ variable: "--font-sans", subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Triage Desk",
-  description: "An agent that reads, investigates and rules on open GitHub issues.",
+  description: "An agent that investigates open GitHub issues and rules on them.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${serif.variable} ${mono.variable} ${sans.variable} h-full antialiased`}>
+    <html lang="en" className={`${display.variable} ${body.variable} ${mono.variable} h-full antialiased`}>
       <body className="min-h-full">{children}</body>
     </html>
   );

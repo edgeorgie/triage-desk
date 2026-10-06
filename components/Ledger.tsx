@@ -1,11 +1,11 @@
 import type { Step } from "@/lib/agent";
 
-const VERB: Record<string, string> = {
-  get_issue: "Reads issue",
-  find_similar: "Checks for duplicates",
-  list_labels: "Reviews labels",
-  read_repo_file: "Opens",
-  submit_triage: "Files the ruling",
+const META: Record<string, { verb: string; icon: string }> = {
+  get_issue: { verb: "Reads issue", icon: "#" },
+  find_similar: { verb: "Looks for duplicates", icon: "≈" },
+  list_labels: { verb: "Reviews the labels", icon: "◆" },
+  read_repo_file: { verb: "Opens", icon: "¶" },
+  submit_triage: { verb: "Files the ruling", icon: "✓" },
 };
 
 function detail(name: string, input: unknown): string {
@@ -15,33 +15,41 @@ function detail(name: string, input: unknown): string {
   return "";
 }
 
-/** The agent's working notes: one line per completed tool call, in order, so its reasoning can be audited. */
+/** The agent's working notes as a timeline: each completed tool call pops in on a growing line. */
 export default function Ledger({ steps, running }: { steps: Step[]; running: boolean }) {
   const rows = steps.filter((s) => s.kind === "thought" || s.output !== undefined);
   return (
-    <ol className="font-mono text-[12.5px] leading-relaxed">
-      {rows.map((r, i) => (
-        <li key={i} className="typed grid grid-cols-[2.2rem_1fr] border-t border-dashed border-[var(--rule)] py-2">
-          <span className="text-ink-soft/60">{String(i + 1).padStart(2, "0")}</span>
-          {r.kind === "thought" ? (
-            <span className="italic text-ink-soft">&ldquo;{r.text}&rdquo;</span>
-          ) : (
-            <span>
-              <span className={r.isError ? "text-signal" : "text-ink"}>
-                {VERB[r.name] ?? r.name} {detail(r.name, r.input)}
-              </span>
-              <span className="mt-0.5 block truncate text-ink-soft">
-                {r.isError ? "! " : "-> "}
-                {r.output?.replace(/\s+/g, " ").slice(0, 110)}
-              </span>
+    <ol className="relative ml-4 border-l-2 border-dashed border-ink/15 pl-8">
+      {rows.map((r, i) => {
+        const meta = r.kind === "tool" ? META[r.name] ?? { verb: r.name, icon: "•" } : { verb: "", icon: "…" };
+        return (
+          <li key={i} className="rise relative pb-5" style={{ animationDelay: "40ms" }}>
+            <span
+              className={`pop absolute -left-[2.9rem] top-0 grid h-8 w-8 place-items-center rounded-full border-2 border-ink text-sm font-bold ${
+                r.kind === "tool" && r.isError ? "bg-rose-soft" : r.kind === "thought" ? "bg-card" : "bg-lemon"
+              }`}
+            >
+              {meta.icon}
             </span>
-          )}
-        </li>
-      ))}
+            {r.kind === "thought" ? (
+              <p className="rounded-2xl rounded-tl-sm bg-card px-4 py-2.5 text-[14px] italic text-ink-soft shadow-sm">{r.text}</p>
+            ) : (
+              <div>
+                <p className="text-[15px] font-semibold">
+                  {meta.verb} <span className="font-mono text-[13px] font-normal text-ink-soft">{detail(r.name, r.input)}</span>
+                </p>
+                <p className={`mt-0.5 truncate font-mono text-[12px] ${r.isError ? "text-rose" : "text-ink-soft"}`}>{r.output?.replace(/\s+/g, " ").slice(0, 120)}</p>
+              </div>
+            )}
+          </li>
+        );
+      })}
       {running && (
-        <li className="grid grid-cols-[2.2rem_1fr] border-t border-dashed border-[var(--rule)] py-2 text-ink-soft">
-          <span>..</span>
-          <span className="animate-pulse">investigating</span>
+        <li className="relative pb-2">
+          <span className="pulse-ring absolute -left-[2.9rem] top-0 grid h-8 w-8 place-items-center rounded-full bg-tangerine text-sm font-bold text-white">
+            <span className="h-2 w-2 animate-ping rounded-full bg-white" />
+          </span>
+          <p className="pt-1 text-[15px] font-semibold text-tangerine">Investigating...</p>
         </li>
       )}
     </ol>
