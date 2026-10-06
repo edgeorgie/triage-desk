@@ -2,10 +2,10 @@ import type { Step } from "@/lib/agent";
 
 const META: Record<string, { verb: string; icon: string }> = {
   get_issue: { verb: "Reads issue", icon: "#" },
-  find_similar: { verb: "Looks for duplicates", icon: "≈" },
-  list_labels: { verb: "Reviews the labels", icon: "◆" },
-  read_repo_file: { verb: "Opens", icon: "¶" },
-  submit_triage: { verb: "Files the ruling", icon: "✓" },
+  find_similar: { verb: "Looks for duplicates", icon: "=" },
+  list_labels: { verb: "Reviews the labels", icon: "*" },
+  read_repo_file: { verb: "Opens", icon: "/" },
+  submit_triage: { verb: "Files the ruling", icon: "ok" },
 };
 
 function detail(name: string, input: unknown): string {
