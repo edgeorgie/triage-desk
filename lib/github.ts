@@ -9,15 +9,16 @@ export interface Issue {
   url: string;
 }
 
+const SEGMENT = /^(?!\.{1,2}$)[\w.-]{1,100}$/;
+
 export function parseRepo(input: string): { owner: string; repo: string } | null {
-  const s = input.trim().replace(/\.git$/, "");
-  const short = s.match(/^([\w.-]+)\/([\w.-]+)$/);
-  if (short) return { owner: short[1], repo: short[2] };
-  try {
-    const u = new URL(s);
-    const [owner, repo] = u.pathname.split("/").filter(Boolean);
-    if (u.hostname === "github.com" && owner && repo) return { owner, repo };
-  } catch {}
+  const s = input.trim().replace(/\/+$/, "").replace(/\.git$/, "");
+  const bare = s.replace(/^(https?:\/\/)?(www\.)?github\.com\//i, "");
+  const hadHost = bare !== s;
+  const parts = bare.split("/");
+  const ok = (o: string, r: string) => SEGMENT.test(o) && SEGMENT.test(r);
+  if (hadHost && parts.length >= 2 && ok(parts[0], parts[1])) return { owner: parts[0], repo: parts[1] };
+  if (!hadHost && parts.length === 2 && ok(parts[0], parts[1])) return { owner: parts[0], repo: parts[1] };
   return null;
 }
 
