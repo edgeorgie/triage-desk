@@ -61,6 +61,20 @@ Status: Verified.
 Status: Verified.
 
 - Given the list, then J/K move, R rules, B triages the next five in sequence, C copies the reply, and all rulings export as JSON.
+- Given a run in progress, when R, B or Enter is pressed, then no second run starts.
+- Given a focused button or link, when Enter is pressed, then the control activates natively and the shortcut does not fire.
+
+### FR-7 Provider key kept in the session by default
+
+Status: Verified.
+
+- Given a provider key, then it is kept in sessionStorage for the tab by default, kept on the device only when the user ticks "Remember on this device", and removable with "Clear key"; the provider choice persists.
+
+### FR-8 Content Security Policy on the static export
+
+Status: Verified.
+
+- Given the Pages export, then every page carries a Content-Security-Policy meta tag that allows scripts only from the site and from the hashes of its inline scripts, and connections only to the site, api.anthropic.com, api.openai.com, api.github.com and raw.githubusercontent.com.
 
 ## Open risks
 
