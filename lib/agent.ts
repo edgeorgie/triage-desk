@@ -106,7 +106,7 @@ export class AnthropicAdapter implements Adapter {
         messages: this.messages,
       }),
     });
-    if (!res.ok) throw new Error(`Anthropic error ${res.status}`);
+    if (!res.ok) throw providerError("Anthropic", res.status);
     const j = (await res.json()) as { content: { type: string; text?: string; id?: string; name?: string; input?: unknown }[] };
     this.messages.push({ role: "assistant", content: j.content });
     return {
@@ -141,7 +141,7 @@ export class OpenAIAdapter implements Adapter {
         messages: this.messages,
       }),
     });
-    if (!res.ok) throw new Error(`OpenAI error ${res.status}`);
+    if (!res.ok) throw providerError("OpenAI", res.status);
     const j = (await res.json()) as {
       choices: { message: { content: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] } }[];
     };
@@ -165,4 +165,16 @@ export class OpenAIAdapter implements Adapter {
 
 export function createAdapter(provider: Provider, key: string, system: string, user: string): Adapter {
   return provider === "anthropic" ? new AnthropicAdapter(key, system, user) : new OpenAIAdapter(key, system, user);
+}
+
+export function providerError(label: string, status: number): Error {
+  const hint =
+    status === 401 || status === 403
+      ? "Check your API key."
+      : status === 429
+        ? "Rate limit reached. Wait a moment and retry."
+        : status >= 500
+          ? "The provider is having problems. Try again later."
+          : "The provider rejected the request.";
+  return new Error(`${label} error ${status}. ${hint}`);
 }
