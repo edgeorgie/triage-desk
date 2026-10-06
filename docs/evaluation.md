@@ -16,7 +16,7 @@ A self-assessment against a reviewer's rubric. It states gaps plainly so a revie
 | Accessibility | Partial | Shortcuts are documented in a dialog and every action has a button; the timeline is an ordered list. Not audited with automated tooling. |
 | Performance | Partial | Each ruling is a few sequential model calls. Not measured with Lighthouse. |
 | Security | Partial | The key lives in sessionStorage by default and in localStorage only if the user opts in. Baseline security headers are set on a Node host. The Pages export carries a CSP meta tag (headers and frame-ancestors are not possible on Pages). |
-| Deployment | Pass | Live on GitHub Pages at https://edgeorgie.github.io/triage-desk/. The deployed build was loaded in a browser and its main flow was exercised. |
+| Deployment | Pass | Live on Vercel at https://triage-desk-iota.vercel.app, with security headers served by the host. The main flow was exercised on the deployed site. |
 | Licensing | Pass | MIT. |
 
 ## Verify it yourself
