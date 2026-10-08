@@ -1,0 +1,422 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import KeyNotes from "@/components/KeyNotes";
+import Ledger from "@/components/Ledger";
+import Ruling from "@/components/Ruling";
+import { PROVIDERS, SYSTEM_PROMPT, createAdapter, runAgent, userPrompt } from "@/lib/agent";
+import type { Provider, Step } from "@/lib/agent";
+import { handlesOwnKeys } from "@/lib/keys";
+import { clearKeys, readKeys, writeKeys } from "@/lib/keystore";
+import { listIssues, parseRepo } from "@/lib/github";
+import type { Issue } from "@/lib/github";
+import type { TriageResult } from "@/lib/triage";
+
+const STORE = "triage-desk.llm";
+const KEY = "triage-desk.llm.key";
+const EXAMPLES = ["sindresorhus/ky", "pmndrs/zustand", "colinhacks/zod"];
+const HOSTS: Record<Provider, string> = { anthropic: "api.anthropic.com", openai: "api.openai.com" };
+
+interface Settings {
+  provider: Provider;
+  key: string;
+  remember: boolean;
+}
+
+function loadSettings(): Settings {
+  const settings: Settings = { provider: "anthropic", key: "", remember: false };
+  try {
+    const raw = localStorage.getItem(STORE);
+    if (raw) {
+      const stored = JSON.parse(raw) as { provider?: Provider; key?: string };
+      if (stored.provider) settings.provider = stored.provider;
+      if (stored.key) {
+        sessionStorage.setItem(KEY, JSON.stringify({ key: stored.key }));
+        localStorage.setItem(STORE, JSON.stringify({ provider: settings.provider }));
+      }
+    }
+    const keys = readKeys<{ key: string }>(KEY, sessionStorage, localStorage);
+    settings.key = keys.value?.key ?? "";
+    settings.remember = keys.remember;
+  } catch {}
+  return settings;
+}
+
+function persistSettings(next: Settings) {
+  try {
+    localStorage.setItem(STORE, JSON.stringify({ provider: next.provider }));
+    if (next.key) writeKeys(KEY, { key: next.key }, next.remember, sessionStorage, localStorage);
+    else clearKeys(KEY, sessionStorage, localStorage);
+  } catch {}
+}
+
+function ageDays(iso: string): number {
+  return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000));
+}
+
+function age(iso: string): string {
+  const d = ageDays(iso);
+  return d < 1 ? "today" : d < 60 ? `${d}d` : `${Math.round(d / 30)}mo`;
+}
+
+const PRIORITY_DOT: Record<string, string> = { p0: "bg-rose", p1: "bg-tangerine", p2: "bg-lemon", p3: "bg-mint" };
+
+export default function Home() {
+  const [input, setInput] = useState("");
+  const [repo, setRepo] = useState<{ owner: string; repo: string } | null>(null);
+  const [issues, setIssues] = useState<Issue[]>([]);
+  const [selected, setSelected] = useState<Issue | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [settings, setSettings] = useState<Settings>({ provider: "anthropic", key: "", remember: false });
+  const [keyOpen, setKeyOpen] = useState(false);
+  const [steps, setSteps] = useState<Step[]>([]);
+  const [running, setRunning] = useState(false);
+  const [rulings, setRulings] = useState<Record<number, TriageResult>>({});
+  const abort = useRef<AbortController | null>(null);
+  const runningRef = useRef(false);
+
+  useEffect(() => {
+    Promise.resolve().then(() => setSettings(loadSettings()));
+  }, []);
+
+  const saveSettings = (next: Settings) => {
+    setSettings(next);
+    persistSettings(next);
+  };
+
+  const load = async (value: string) => {
+    const parsed = parseRepo(value);
+    if (!parsed) {
+      setError("Enter a repository as owner/name or paste its GitHub URL.");
+      return;
+    }
+    setError("");
+    setLoading(true);
+    try {
+      const list = await listIssues(parsed.owner, parsed.repo);
+      if (list.length === 0) throw new Error("This repository has no open issues.");
+      setRepo(parsed);
+      setIssues(list);
+      setSelected(list[0]);
+      setSteps([]);
+      setRulings({});
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load issues.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const pick = (issue: Issue) => {
+    abort.current?.abort();
+    runningRef.current = false;
+    setRunning(false);
+    setSelected(issue);
+    setSteps([]);
+    setError("");
+  };
+
+  const ruleIssue = async (target: Issue): Promise<boolean> => {
+    if (!repo || runningRef.current) return false;
+    if (!settings.key) {
+      setKeyOpen(true);
+      setError("Add your API key first (top right).");
+      return false;
+    }
+    setError("");
+    setSteps([]);
+    runningRef.current = true;
+    setRunning(true);
+    const controller = new AbortController();
+    abort.current = controller;
+    try {
+      const adapter = createAdapter(settings.provider, settings.key, SYSTEM_PROMPT, userPrompt(`${repo.owner}/${repo.repo}`, target));
+      const result = await runAgent({
+        adapter,
+        ctx: { owner: repo.owner, repo: repo.repo, target, pool: issues },
+        onStep: (s) =>
+          setSteps((prev) => {
+            if (s.kind === "tool") {
+              const i = prev.findIndex((p) => p.kind === "tool" && p.id === s.id);
+              if (i >= 0) return prev.map((p, n) => (n === i ? s : p));
+            }
+            return [...prev, s];
+          }),
+        signal: controller.signal,
+      });
+      setRulings((r) => ({ ...r, [target.number]: result }));
+      return true;
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "AbortError")) setError(e instanceof Error ? e.message : "The agent failed.");
+      return false;
+    } finally {
+      if (abort.current === controller) {
+        runningRef.current = false;
+        setRunning(false);
+      }
+    }
+  };
+
+  const rule = () => {
+    if (selected) void ruleIssue(selected);
+  };
+
+  const [batch, setBatch] = useState<{ done: number; total: number } | null>(null);
+  const ruleBatch = async () => {
+    if (!selected || batch || runningRef.current) return;
+    const start = issues.findIndex((i) => i.number === selected.number);
+    const targets = issues.slice(start, start + 5);
+    for (let n = 0; n < targets.length; n++) {
+      setBatch({ done: n, total: targets.length });
+      setSelected(targets[n]);
+      const ok = await ruleIssue(targets[n]);
+      if (!ok) break;
+    }
+    setBatch(null);
+  };
+
+  const [help, setHelp] = useState(false);
+  const move = (delta: number) => {
+    if (!selected || running) return;
+    const i = issues.findIndex((x) => x.number === selected.number);
+    const next = issues[Math.min(issues.length - 1, Math.max(0, i + delta))];
+    if (next) pick(next);
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "Enter" && handlesOwnKeys(tag, el.getAttribute("role"), el.isContentEditable)) return;
+      if (e.key === "?") setHelp((h) => !h);
+      else if (e.key === "Escape") setHelp(false);
+      else if (e.key === "j" || e.key === "ArrowDown") {
+        e.preventDefault();
+        move(1);
+      } else if (e.key === "k" || e.key === "ArrowUp") {
+        e.preventDefault();
+        move(-1);
+      } else if (e.key === "r" || e.key === "Enter") {
+        e.preventDefault();
+        rule();
+      } else if (e.key === "b") void ruleBatch();
+      else if (e.key === "c") {
+        const r = selected ? rulings[selected.number] : undefined;
+        if (r) navigator.clipboard?.writeText(r.reply);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  const exportRulings = () => {
+    const rows = issues.filter((i) => rulings[i.number]).map((i) => ({ issue: i.number, title: i.title, url: i.url, ...rulings[i.number] }));
+    const url = URL.createObjectURL(new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${repo?.repo ?? "triage"}-rulings.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const ruled = Object.keys(rulings).length;
+  const ruling = selected ? rulings[selected.number] : undefined;
+
+  return (
+    <div className="relative overflow-hidden">
+      <div className="pointer-events-none absolute -right-24 -top-24 h-[28rem] w-[28rem] rounded-full bg-lemon/70 blur-3xl" />
+      <main className="relative mx-auto max-w-6xl px-6 pb-28 pt-8 sm:px-10">
+        <nav className="flex items-center justify-between">
+          <span className="display flex items-center gap-2 text-lg font-bold">
+            <span className="bob grid h-8 w-8 place-items-center rounded-xl bg-tangerine text-white">T</span>
+            triage desk
+          </span>
+          <div className="relative">
+            <button
+              onClick={() => setKeyOpen((o) => !o)}
+              className={`rounded-full border-2 border-ink px-4 py-1.5 text-sm font-semibold transition hover:-translate-y-0.5 ${settings.key ? "bg-mint-soft" : "bg-lemon"}`}
+            >
+              {settings.key ? `${PROVIDERS[settings.provider].label} key set` : "Add API key"}
+            </button>
+            {keyOpen && (
+              <div className="pop absolute right-0 z-10 mt-3 w-80 max-w-[calc(100vw-2rem)] rounded-3xl border-2 border-ink bg-card p-4 shadow-xl">
+                <div className="mb-3">
+                  <KeyNotes host={HOSTS[settings.provider]} remember={settings.remember} hasKey={Boolean(settings.key)} onRemember={(remember) => saveSettings({ ...settings, remember })} onClear={() => saveSettings({ ...settings, key: "" })} />
+                </div>
+                <select
+                  value={settings.provider}
+                  onChange={(e) => saveSettings({ ...settings, provider: e.target.value as Provider })}
+                  className="mb-2 w-full rounded-xl border border-line bg-cream px-3 py-2 text-sm"
+                >
+                  {Object.entries(PROVIDERS).map(([k, v]) => (
+                    <option key={k} value={k}>{v.label}</option>
+                  ))}
+                </select>
+                <input
+                  type="password"
+                  value={settings.key}
+                  onChange={(e) => saveSettings({ ...settings, key: e.target.value })}
+                  placeholder="API key"
+                  className="w-full rounded-xl border border-line bg-cream px-3 py-2 text-sm outline-none focus:border-tangerine"
+                />
+              </div>
+            )}
+          </div>
+        </nav>
+
+        <header className="rise mt-14">
+          <h1 className="display text-6xl font-extrabold leading-[0.95] sm:text-8xl">
+            Rule on every
+            <br />
+            <span className="relative inline-block">
+              open issue.
+              <svg className="absolute -bottom-3 left-0 w-full" viewBox="0 0 400 18" fill="none" preserveAspectRatio="none" aria-hidden>
+                <path className="draw" d="M3 12 C 70 2, 130 16, 200 8 S 340 4, 397 11" stroke="#ff6a2b" strokeWidth="6" strokeLinecap="round" />
+              </svg>
+            </span>
+          </h1>
+          <p className="mt-7 max-w-lg text-lg text-ink-soft">An agent reads the issue, hunts for duplicates, checks your labels and files, then hands you a ruling and a reply you can paste.</p>
+        </header>
+
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            load(input);
+          }}
+          className="mt-10 flex max-w-2xl items-center gap-2 rounded-full border-2 border-ink bg-card p-2 pl-6 shadow-[6px_6px_0_0_var(--ink)] transition focus-within:shadow-[8px_8px_0_0_var(--tangerine)]"
+        >
+          <span className="font-mono text-sm text-ink-soft">github.com/</span>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="owner/name"
+            className="min-w-0 flex-1 bg-transparent py-2 font-mono text-lg outline-none placeholder:text-ink-soft/40"
+            aria-label="Repository"
+          />
+          <button disabled={loading} className="rounded-full bg-ink px-6 py-3 text-sm font-bold text-cream transition hover:bg-tangerine active:scale-95 disabled:opacity-60">
+            {loading ? "Loading..." : "Open docket"}
+          </button>
+        </form>
+        <div className="mt-4 flex flex-wrap items-center gap-2 text-sm text-ink-soft">
+          try
+          {EXAMPLES.map((ex) => (
+            <button
+              key={ex}
+              onClick={() => {
+                setInput(ex);
+                load(ex);
+              }}
+              className="rounded-full bg-card px-3 py-1 font-mono text-[13px] shadow-sm transition hover:-translate-y-0.5 hover:bg-tangerine-soft hover:shadow-md"
+            >
+              {ex}
+            </button>
+          ))}
+        </div>
+        {error && <p className="mt-4 rounded-2xl bg-rose-soft px-4 py-3 text-sm font-medium text-rose">{error}</p>}
+
+        {repo && selected && (
+          <div className="mt-14 grid gap-8 lg:grid-cols-[22rem_1fr]">
+            <nav aria-label="Open issues" className="lg:max-h-[78vh] lg:overflow-y-auto lg:pr-2">
+              <p className="mb-3 font-mono text-xs uppercase tracking-widest text-ink-soft">{issues.length} open &middot; newest first</p>
+              <ul className="space-y-2">
+                {issues.map((i, n) => {
+                  const r = rulings[i.number];
+                  const active = selected.number === i.number;
+                  return (
+                    <li key={i.number} className="rise" style={{ animationDelay: `${Math.min(n, 12) * 35}ms` }}>
+                      <button
+                        onClick={() => pick(i)}
+                        className={`w-full rounded-2xl border-2 p-3.5 text-left transition hover:-translate-y-0.5 hover:shadow-md ${
+                          active ? "border-ink bg-card shadow-[4px_4px_0_0_var(--ink)]" : "border-transparent bg-card/70"
+                        }`}
+                      >
+                        <span className="flex items-center gap-2 font-mono text-[11px] text-ink-soft">
+                          #{i.number} &middot; {age(i.createdAt)} &middot; {i.comments} comments
+                          {r && <span className={`ml-auto h-2.5 w-2.5 rounded-full ${PRIORITY_DOT[r.priority]}`} title={`Ruled ${r.priority}`} />}
+                        </span>
+                        <span className="mt-1 block text-[15px] font-semibold leading-snug">{i.title}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </nav>
+
+            <article key={selected.number} className="rise">
+              <p className="font-mono text-xs uppercase tracking-widest text-ink-soft">
+                #{selected.number} &middot; {selected.author} &middot; {age(selected.createdAt)} ago
+              </p>
+              <h2 className="display mt-2 text-4xl font-bold leading-tight sm:text-5xl">{selected.title}</h2>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {selected.labels.map((l) => (
+                  <span key={l} className="rounded-full bg-card px-3 py-1 text-xs font-medium shadow-sm">{l}</span>
+                ))}
+              </div>
+              <p className="mt-5 line-clamp-6 max-w-2xl whitespace-pre-wrap text-[15px] leading-relaxed text-ink-soft">{selected.body || "(no description)"}</p>
+              <a href={selected.url} target="_blank" rel="noreferrer" className="mt-2 inline-block text-sm font-semibold underline decoration-tangerine decoration-2 underline-offset-4">
+                Open on GitHub
+              </a>
+
+              <div className="mt-8 flex flex-wrap items-center gap-3">
+                <button
+                  onClick={rule}
+                  disabled={running}
+                  className={`rounded-full bg-tangerine px-8 py-4 text-base font-bold text-white shadow-lg shadow-tangerine/30 transition hover:-translate-y-0.5 hover:shadow-xl active:scale-95 disabled:opacity-70 ${running ? "pulse-ring" : ""}`}
+                >
+                  {running ? "Investigating..." : ruling ? "Rule again" : "Rule on this issue"}
+                  <kbd className="ml-3 rounded-md bg-white/25 px-1.5 py-0.5 font-mono text-xs">R</kbd>
+                </button>
+                <button
+                  onClick={() => void ruleBatch()}
+                  disabled={running || batch !== null}
+                  className="rounded-full border-2 border-ink px-6 py-3.5 text-sm font-bold transition hover:-translate-y-0.5 hover:bg-card active:scale-95 disabled:opacity-50"
+                >
+                  {batch ? `Ruling ${batch.done + 1} of ${batch.total}...` : "Triage the next 5"}
+                  <kbd className="ml-3 rounded-md bg-ink/10 px-1.5 py-0.5 font-mono text-xs">B</kbd>
+                </button>
+                {ruled > 0 && (
+                  <button onClick={exportRulings} className="text-sm font-semibold underline decoration-tangerine decoration-2 underline-offset-4 hover:text-tangerine">
+                    Export {ruled} ruling{ruled === 1 ? "" : "s"}
+                  </button>
+                )}
+              </div>
+
+              {(steps.length > 0 || running) && (
+                <div className="mt-10">
+                  <p className="mb-4 font-mono text-xs uppercase tracking-widest text-ink-soft">What the agent did</p>
+                  <Ledger steps={steps} running={running} />
+                </div>
+              )}
+              {ruling && (
+                <div className="mt-8">
+                  <Ruling result={ruling} issue={selected} />
+                </div>
+              )}
+            </article>
+          </div>
+        )}
+      </main>
+
+      <button onClick={() => setHelp(true)} className="fixed bottom-5 right-5 grid h-11 w-11 place-items-center rounded-full border-2 border-ink bg-lemon font-bold shadow-[3px_3px_0_0_var(--ink)] transition hover:-translate-y-0.5" aria-label="Keyboard shortcuts">
+        ?
+      </button>
+      {help && (
+        <div className="fixed inset-0 z-40 grid place-items-center bg-ink/40 p-6" onClick={() => setHelp(false)}>
+          <div className="pop w-full max-w-sm rounded-[2rem] border-2 border-ink bg-card p-7 shadow-[8px_8px_0_0_var(--ink)]" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Keyboard shortcuts">
+            <h3 className="display text-2xl font-bold">Keyboard</h3>
+            <dl className="mt-5 space-y-3 text-[15px]">
+              {[["J / K", "Next / previous issue"], ["R or Enter", "Rule on this issue"], ["B", "Triage the next 5"], ["C", "Copy the suggested reply"], ["?", "Show or hide this"]].map(([k, d]) => (
+                <div key={k} className="flex items-center justify-between gap-4">
+                  <dt><kbd className="rounded-lg bg-ink px-2 py-1 font-mono text-xs text-cream">{k}</kbd></dt>
+                  <dd className="text-ink-soft">{d}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

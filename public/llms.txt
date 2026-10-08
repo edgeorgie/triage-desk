@@ -1,0 +1,20 @@
+# triage-desk
+
+> An agent that investigates open GitHub issues with tools and rules on them.
+
+triage-desk is a client-side Next.js application. API keys and user content stay in the browser. The specification is the source of truth; `npm run verify` is the deterministic quality gate.
+
+## Documentation
+
+- [README](https://github.com/edgeorgie/triage-desk/blob/main/README.md): what it does, how to run it, data flow
+- [Specification](https://github.com/edgeorgie/triage-desk/blob/main/docs/spec/spec.md): requirements and acceptance criteria
+- [Requirements as JSON](https://github.com/edgeorgie/triage-desk/blob/main/docs/spec/requirements.json): machine-readable list with status, files and tests
+- [Traceability](https://github.com/edgeorgie/triage-desk/blob/main/docs/spec/traceability.md): requirement to code, test and evidence
+- [Architecture](https://github.com/edgeorgie/triage-desk/blob/main/docs/architecture.md): diagrams and modules
+- [Agent workflow](https://github.com/edgeorgie/triage-desk/blob/main/AGENTS.md): rules and quality gates
+
+## Optional
+
+- [Design system](https://github.com/edgeorgie/triage-desk/blob/main/docs/design-system.md)
+- [Glossary](https://github.com/edgeorgie/triage-desk/blob/main/docs/glossary.md)
+- [Evaluation](https://github.com/edgeorgie/triage-desk/blob/main/docs/evaluation.md)

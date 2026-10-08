@@ -1,0 +1,145 @@
+@import "tailwindcss";
+
+:root {
+  --cream: #fff9e8;
+  --card: #ffffff;
+  --ink: #17130a;
+  --ink-soft: #6b6453;
+  --line: rgba(23, 19, 10, 0.1);
+  --tangerine: #ff6a2b;
+  --tangerine-soft: #ffe2d2;
+  --lemon: #ffe45e;
+  --mint: #19b47a;
+  --mint-soft: #d8f5e8;
+  --rose: #ef4565;
+  --rose-soft: #fde0e6;
+}
+
+@theme inline {
+  --color-cream: var(--cream);
+  --color-card: var(--card);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-line: var(--line);
+  --color-tangerine: var(--tangerine);
+  --color-tangerine-soft: var(--tangerine-soft);
+  --color-lemon: var(--lemon);
+  --color-mint: var(--mint);
+  --color-mint-soft: var(--mint-soft);
+  --color-rose: var(--rose);
+  --color-rose-soft: var(--rose-soft);
+  --font-display: var(--font-display);
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-mono);
+}
+
+body {
+  background: var(--cream);
+  color: var(--ink);
+  font-family: var(--font-body), system-ui, sans-serif;
+}
+
+.display {
+  font-family: var(--font-display), system-ui, sans-serif;
+  letter-spacing: -0.035em;
+}
+
+.rise {
+  animation: rise 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.pop {
+  animation: pop 480ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* the hand-drawn underline under the title draws itself */
+.draw {
+  stroke-dasharray: 400;
+  stroke-dashoffset: 400;
+  animation: draw 900ms 350ms cubic-bezier(0.65, 0, 0.35, 1) forwards;
+}
+
+@keyframes draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.bob {
+  animation: bob 3.2s ease-in-out infinite;
+}
+
+@keyframes bob {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-2deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(2deg);
+  }
+}
+
+.grow {
+  transform-origin: top;
+  animation: grow 450ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes grow {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+.pulse-ring {
+  animation: pulse-ring 1.6s ease-out infinite;
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 106, 43, 0.5);
+  }
+  100% {
+    box-shadow: 0 0 0 18px rgba(255, 106, 43, 0);
+  }
+}
+
+.meter {
+  transition: width 1000ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise,
+  .pop,
+  .draw,
+  .bob,
+  .grow,
+  .pulse-ring {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}
