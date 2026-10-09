@@ -1,0 +1,36 @@
+name: Release
+
+# Tags main and publishes a GitHub release. Run it from the Actions tab after the
+# release/<x.y.z> branch has been merged into main (GitFlow).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, without the leading v (must match package.json on main)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Check the version matches package.json
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$pkg" != "$VERSION" ]; then
+            echo "package.json on main is $pkg, expected $VERSION" >&2
+            exit 1
+          fi
+      - name: Create the tag and the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh release create "v$VERSION" --target main --title "v$VERSION" --generate-notes

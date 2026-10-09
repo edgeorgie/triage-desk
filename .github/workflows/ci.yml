@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # --ignore-scripts: native postinstall downloads are not needed for the checks
+      - run: npm ci --ignore-scripts
+      - run: npx next typegen
+        if: ${{ hashFiles('next.config.*') != '' }}
+      - run: npm run verify
