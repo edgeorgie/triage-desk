@@ -2,6 +2,14 @@
 
 Principles that outrank any single requirement.
 
+> **Note on this file's structure:** the constitution/spec/plan/tasks/traceability
+> layout under `docs/spec/` is an intentional shared house style used across this
+> candidate's repos ([eval-lab](https://github.com/edgeorgie/eval-lab/blob/main/docs/spec/constitution.md)
+> uses the same skeleton) — a repeatable spec-driven-development process applied
+> per-project, not boilerplate padding copy-pasted without adaptation. Only the
+> "Product"/non-goals sections below are project-specific; "Engineering standards"
+> and "Definition of done" are the deliberately-reused process contract.
+
 ## Product
 
 - Produce a structured ruling the maintainer can audit.
