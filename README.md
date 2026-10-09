@@ -70,6 +70,8 @@ Open http://localhost:3000. There are no environment variables: click **Add API 
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fedgeorgie%2Ftriage-desk)
 
+> **Sandboxed/CI environments with `NODE_ENV=production` set:** `npm ci`/`npm install` will silently skip devDependencies (including `typescript` and `@tailwindcss/postcss`), causing `npm run typecheck`/`npm run build` to fail with missing-module errors that look like real bugs but aren't. Fix: `unset NODE_ENV && npm install --include=dev` before running either command.
+
 ## Data flow and privacy
 
 | Data | Where it goes | Stored |
