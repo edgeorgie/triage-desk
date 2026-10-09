@@ -1,0 +1,50 @@
+name: Eval (triage heuristic)
+
+# Dogfoods edgeorgie/eval-lab (the candidate's own CLI + GitHub Action, PR #21) as a CI gate
+# on triage-desk's own heuristic classification logic (lib/heuristic-triage.ts), via
+# scripts/eval-adapter.mjs (--model exec). Runs on every PR to this repo so a change to the
+# kind/priority heuristics that breaks an existing case fails CI before merge.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run eval-lab against triage-desk's heuristic triage logic
+        id: eval
+        uses: edgeorgie/eval-lab@main
+        with:
+          config: eval.config.json
+          model: exec
+          out: eval-run.json
+
+      - name: Verify the eval actually ran and passed
+        run: |
+          if [ "${{ steps.eval.outputs.passed }}" != "true" ]; then
+            echo "eval-lab reported a failure against triage-desk's heuristic triage cases."
+            exit 1
+          fi
+          echo "Confirmed: eval-lab (edgeorgie/eval-lab@main) ran triage-desk's real heuristic triage logic and all cases passed."
+
+      - name: Upload eval run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-lab-run
+          path: eval-run.json
+          if-no-files-found: ignore

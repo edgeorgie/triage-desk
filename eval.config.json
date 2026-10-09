@@ -1,0 +1,55 @@
+{
+  "model": "exec",
+  "execCmd": "node --experimental-strip-types scripts/eval-adapter.mjs",
+  "variants": [
+    { "id": "v1", "name": "Heuristic triage (lib/heuristic-triage.ts)", "prompt": "{{input}}" }
+  ],
+  "cases": [
+    {
+      "id": "crash-bug",
+      "input": "App crashes with a stack trace on launch\nEvery time I open the app on v3.1 it crashes immediately. Here's the exception and stack trace from the logs. Steps to reproduce: install, open app, crash. Expected: app opens normally.",
+      "assertions": [
+        { "id": "a1", "type": "contains", "value": "kind=bug" },
+        { "id": "a2", "type": "contains", "value": "priority=p0" }
+      ]
+    },
+    {
+      "id": "plain-bug",
+      "input": "Export button fails silently\nClicking the CSV export button does nothing, no error shown. This is a bug, it fails every time. Expected: a file download.",
+      "assertions": [
+        { "id": "a3", "type": "contains", "value": "kind=bug" },
+        { "id": "a4", "type": "contains", "value": "priority=p1" }
+      ]
+    },
+    {
+      "id": "feature-request",
+      "input": "Please add dark mode support\nIt would be nice to have a dark theme. Could you add support for system-level theme detection too?",
+      "assertions": [
+        { "id": "a5", "type": "contains", "value": "kind=feature" },
+        { "id": "a6", "type": "contains", "value": "priority=p3" }
+      ]
+    },
+    {
+      "id": "docs-typo",
+      "input": "Typo in README installation section\nThe documentation has a typo: 'instal' should be 'install' in the README.",
+      "assertions": [
+        { "id": "a7", "type": "contains", "value": "kind=docs" }
+      ]
+    },
+    {
+      "id": "question",
+      "input": "How do I configure the webhook URL?\nI have a question: how to set up the webhook endpoint for this app? Is it possible to use a custom domain?",
+      "assertions": [
+        { "id": "a8", "type": "contains", "value": "kind=question" }
+      ]
+    },
+    {
+      "id": "duplicate-crash",
+      "input": "App crashes right after opening, blank screen\nSame as other reports: the app opens to a blank screen and then it crashes, every single time. Steps to reproduce: launch the app. Version: v2.3. Expected: normal startup.",
+      "assertions": [
+        { "id": "a9", "type": "contains", "value": "kind=bug" },
+        { "id": "a10", "type": "not_contains", "value": "duplicateof=none" }
+      ]
+    }
+  ]
+}
