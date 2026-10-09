@@ -43,3 +43,6 @@ next-env.d.ts
 CLAUDE.md
 .claude/
 !.env.example
+
+# triage bot run logs (CI uploads these as a workflow artifact instead)
+/triage-logs/
