@@ -102,6 +102,17 @@ flowchart LR
   - Labels it applied autonomously: `feature`, `p3`
   - Each run also writes `triage-logs/runs.jsonl` and `triage-logs/last-run.json`, uploaded as a workflow artifact (`triage-log-<run id>`) on every run — a machine-readable record alongside the human-readable Actions log.
 - **To enable LLM-grade triage:** add an `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) secret under *Settings → Secrets and variables → Actions*. No code changes needed; the bot detects it automatically and switches modes.
+- I built the webhook-triggered bot, see [PR #25](https://github.com/edgeorgie/triage-desk/pull/25). I wired eval-lab into this repo's own CI to test the bot's real triage logic, see [PR #27](https://github.com/edgeorgie/triage-desk/pull/27).
+
+## By the numbers
+
+- 22s — webhook-to-comment latency, real run: [triage-desk/actions/runs/37983913473](https://github.com/edgeorgie/triage-desk/actions/runs/37983913473)
+- 83.3% (15/18) — kind classification accuracy, self-labeled benchmark ([ACCURACY.md](ACCURACY.md))
+- 83.3% (15/18) — priority classification accuracy, same benchmark
+- 1/2 (50%) — duplicate detection rate on the same benchmark (near-verbatim caught, paraphrase missed)
+- 0.274ms → ~0.03ms — heuristic triage latency per case, cold vs. JIT-warmed
+- 6/6 — eval-lab eval cases passing against this bot's real heuristic logic in CI ([run 37987251361](https://github.com/edgeorgie/triage-desk/actions/runs/37987251361))
+- 22/22 — local unit tests passing (`npm test`)
 
 ## Limits
 
