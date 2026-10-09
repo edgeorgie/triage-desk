@@ -96,9 +96,10 @@ flowchart LR
 - **LLM reasoning (optional):** if `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is present as a repository secret (Settings → Secrets and variables → Actions), the bot calls that provider for the kind/priority/duplicate/reply reasoning, same as the browser app.
 - **Heuristic fallback (documented, no fabricated LLM usage):** with neither secret configured, `scripts/triage-bot.ts` runs a deterministic, keyword/overlap-based triage (see `heuristicTriage` in the script) so the full pipeline — trigger → investigate → comment → label — still produces real output end-to-end, clearly labeled `_Automated heuristic triage (no LLM key configured)_` in the posted comment.
 - **Evidence this actually runs, not just "should run":**
-  - Example run: <RUN_URL>
-  - Example issue the bot triaged on its own: <ISSUE_URL>
-  - Example comment it posted: <COMMENT_URL>
+  - Example run (triggered by the real `issues.opened` webhook, 22s, green): https://github.com/edgeorgie/triage-desk/actions/runs/37983913473
+  - Example issue the bot triaged on its own: https://github.com/edgeorgie/triage-desk/issues/26
+  - Example comment it posted: https://github.com/edgeorgie/triage-desk/issues/26#issuecomment-6088283797
+  - Labels it applied autonomously: `feature`, `p3`
   - Each run also writes `triage-logs/runs.jsonl` and `triage-logs/last-run.json`, uploaded as a workflow artifact (`triage-log-<run id>`) on every run — a machine-readable record alongside the human-readable Actions log.
 - **To enable LLM-grade triage:** add an `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) secret under *Settings → Secrets and variables → Actions*. No code changes needed; the bot detects it automatically and switches modes.
 
