@@ -4,6 +4,14 @@
 
 **An agent that investigates open GitHub issues with tools, then rules on them.**
 
+> This exists as direct evidence for PostHog's Product Engineer posting, which
+> explicitly asks: *"Have you built anything agents use? ...an API an agent
+> can drive, an MCP server, evals, docs written for a machine."* This repo is
+> a **GitHub-webhook-triggered autonomous agent bot** (not a human-clicked UI
+> demo) — see [Production usage](#production-usage) for the real webhook run,
+> issue, and comment it produced on its own, plus the measured accuracy
+> benchmark in [ACCURACY.md](ACCURACY.md).
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)](https://nextjs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
