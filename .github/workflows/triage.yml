@@ -1,0 +1,54 @@
+name: Triage
+
+# Fires automatically on real GitHub webhook events — no human click. New issues (and PRs,
+# treated as issues for triage purposes) are investigated by the triage-desk agent, which
+# posts a comment and applies labels using the workflow's built-in GITHUB_TOKEN.
+#
+# LLM reasoning (kind/priority/duplicate/reply) uses ANTHROPIC_API_KEY or OPENAI_API_KEY from
+# repository secrets if present (Settings > Secrets and variables > Actions). With neither
+# secret configured, scripts/triage-bot.ts runs a documented heuristic fallback so the pipeline
+# still produces real, inspectable output end-to-end without any paid API key.
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+concurrency:
+  group: triage-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    if: github.event.issue.pull_request == null || github.event_name == 'pull_request_target'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run triage bot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TRIAGE_ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: npm run triage-bot
+
+      - name: Upload triage log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-log-${{ github.run_id }}
+          path: triage-logs/
+          if-no-files-found: ignore

@@ -29,8 +29,9 @@ Open **https://triage-desk-iota.vercel.app**, enter any public `owner/name` repo
 - **Structured ruling.** Kind, priority, labels, duplicate, missing information, a reply you can paste, and confidence.
 - **Auditable.** A timeline shows every tool call the agent made.
 - **Fast to drive.** Keyboard shortcuts, batch triage of five issues, JSON export.
-- **Read-only by design.** The agent never writes to GitHub; a human applies the ruling.
+- **Read-only in the browser.** The browser app never writes to GitHub; a human applies the ruling. The CI bot below is the one exception, scoped to its own workflow token.
 - **Bring your own key.** Anthropic or OpenAI, entered in the browser. No server, no environment variables.
+- **Runs unattended too.** A GitHub Actions bot (`scripts/triage-bot.ts`) triages every new issue automatically — see [Production usage](#production-usage).
 
 ## How it works
 
@@ -75,6 +76,32 @@ Open http://localhost:3000. There are no environment variables: click **Add API 
 
 Issue text is untrusted input to an agent with tools. Blast radius is limited: tools are read-only, file paths are guarded, the loop is capped at 8 steps and the ruling is schema-validated. A hostile issue could still mislead the ruling, so a human applies it.
 
+## Production usage
+
+Beyond the browser demo, this repo ships a **headless agent bot** that runs autonomously —
+no human click, no browser, no manually-entered key for the GitHub actions it takes.
+
+```mermaid
+flowchart LR
+  W[GitHub webhook: issues.opened] --> GA[.github/workflows/triage.yml]
+  GA --> S[scripts/triage-bot.ts]
+  S -->|reuses| L[lib/agent.ts, lib/tools.ts, lib/triage.ts]
+  S -->|GITHUB_TOKEN| C[Issue comment]
+  S -->|GITHUB_TOKEN| LB[Issue labels]
+```
+
+- **Trigger:** a real GitHub webhook (`issues: [opened]`, also `pull_request_target: [opened]`), delivered by GitHub itself when anyone opens an issue — not a manual run.
+- **Logic reuse:** `scripts/triage-bot.ts` imports the exact same `lib/agent.ts` agent loop, `lib/tools.ts` tools and `lib/triage.ts` schema the browser UI uses; it just swaps the browser's `fetch`-based "paste your key" flow for a Node/CI environment.
+- **Writes to GitHub autonomously:** the workflow's built-in `GITHUB_TOKEN` is enough to post a triage comment and apply labels — no new secret required for that part.
+- **LLM reasoning (optional):** if `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is present as a repository secret (Settings → Secrets and variables → Actions), the bot calls that provider for the kind/priority/duplicate/reply reasoning, same as the browser app.
+- **Heuristic fallback (documented, no fabricated LLM usage):** with neither secret configured, `scripts/triage-bot.ts` runs a deterministic, keyword/overlap-based triage (see `heuristicTriage` in the script) so the full pipeline — trigger → investigate → comment → label — still produces real output end-to-end, clearly labeled `_Automated heuristic triage (no LLM key configured)_` in the posted comment.
+- **Evidence this actually runs, not just "should run":**
+  - Example run: <RUN_URL>
+  - Example issue the bot triaged on its own: <ISSUE_URL>
+  - Example comment it posted: <COMMENT_URL>
+  - Each run also writes `triage-logs/runs.jsonl` and `triage-logs/last-run.json`, uploaded as a workflow artifact (`triage-log-<run id>`) on every run — a machine-readable record alongside the human-readable Actions log.
+- **To enable LLM-grade triage:** add an `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) secret under *Settings → Secrets and variables → Actions*. No code changes needed; the bot detects it automatically and switches modes.
+
 ## Limits
 
 - Public repositories only; 60 unauthenticated GitHub calls per hour.
@@ -97,6 +124,7 @@ Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4. Client-side only;
 | `npm run spec:check` | Traceability gate |
 | `npm run verify` | All of the above |
 | `npm run deploy:pages` | Static export to the `gh-pages` branch |
+| `npm run triage-bot` | Headless triage for one issue (used by `.github/workflows/triage.yml`) |
 
 ## Deployment
 

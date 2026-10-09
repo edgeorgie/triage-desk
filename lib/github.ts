@@ -47,21 +47,25 @@ export function toIssue(a: ApiIssue): Issue {
   };
 }
 
-// Runs in the browser. Public repos, unauthenticated (60 requests per hour per IP).
-export async function listIssues(owner: string, repo: string, perPage = 40): Promise<Issue[]> {
-  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&sort=created&direction=desc`);
+// Runs in the browser by default (unauthenticated, 60 requests/hour per IP). An optional
+// token lets server-side callers (e.g. the GitHub Actions bot) authenticate and raise that
+// limit to 5000/hour without changing the browser code path.
+export async function listIssues(owner: string, repo: string, perPage = 40, token?: string): Promise<Issue[]> {
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28" } : {};
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&sort=created&direction=desc`, { headers });
   if (res.status === 403 || res.status === 429) throw new Error("GitHub rate limit reached. Try again in a few minutes.");
   if (!res.ok) throw new Error(`Repository not found or private (${res.status}).`);
   const data = (await res.json()) as ApiIssue[];
   return data.filter((i) => !i.pull_request).map(toIssue);
 }
 
-export async function readRepoFile(owner: string, repo: string, path: string): Promise<string> {
+export async function readRepoFile(owner: string, repo: string, path: string, token?: string): Promise<string> {
   const url = new URL(`https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/HEAD/${path.replace(/^\/+/, "")}`);
   if (url.origin !== "https://raw.githubusercontent.com" || !url.pathname.startsWith(`/${owner}/${repo}/HEAD/`) || url.search || url.hash) {
     throw new Error(`Invalid path: ${path}`);
   }
-  const res = await fetch(url);
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const res = await fetch(url, { headers });
   if (!res.ok) throw new Error(`File not found: ${path}`);
   return (await res.text()).slice(0, 6000);
 }
