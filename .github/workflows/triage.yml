@@ -84,6 +84,7 @@ jobs:
           # whenever neither key is present in the environment.
           ANTHROPIC_API_KEY: ${{ steps.trust.outputs.trusted == 'true' && secrets.ANTHROPIC_API_KEY || '' }}
           OPENAI_API_KEY: ${{ steps.trust.outputs.trusted == 'true' && secrets.OPENAI_API_KEY || '' }}
+          ANTHROPIC_WORKSPACE_ID: ${{ steps.trust.outputs.trusted == 'true' && secrets.ANTHROPIC_WORKSPACE_ID || '' }}
           TRIAGE_ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: npm run triage-bot
 
