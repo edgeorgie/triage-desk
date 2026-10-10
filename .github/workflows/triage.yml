@@ -8,6 +8,23 @@ name: Triage
 # repository secrets if present (Settings > Secrets and variables > Actions). With neither
 # secret configured, scripts/triage-bot.ts runs a documented heuristic fallback so the pipeline
 # still produces real, inspectable output end-to-end without any paid API key.
+#
+# COST / DOS GATE (added after a security review — see PR that introduced this comment):
+# `pull_request_target` runs with repo write permissions and (when configured) paid LLM API
+# secrets, and GitHub fires it for PRs opened by ANY account, including anonymous forks with
+# zero prior relationship to this repo — there is no author-association check built into the
+# trigger itself. Triaging contributions from first-time/external contributors IS the intended
+# feature (that's the whole point of an issue/PR triage bot on a public repo), so we deliberately
+# do NOT block pull_request_target from running for forks, and we do NOT switch to `pull_request`
+# (which would strip the write token needed to post the comment/labels on a fork PR). Instead we
+# gate the one genuinely unbounded cost — the paid LLM call — behind `author_association`:
+# only OWNER/MEMBER/COLLABORATOR runs get the real LLM-backed triage; everyone else still gets
+# the free, deterministic heuristic triage (see steps.trust below and the "Run triage bot" step's
+# env). That preserves "every incoming issue/PR gets triaged automatically" for anyone, while an
+# anonymous account spamming PRs can no longer burn the repo owner's ANTHROPIC_API_KEY/
+# OPENAI_API_KEY budget — the worst they can do is trigger more cheap, LLM-free Actions runs,
+# which is the same exposure the plain `issues: [opened]` trigger already has and is bounded by
+# GitHub Actions' own per-repo minute limits.
 on:
   issues:
     types: [opened]
@@ -37,11 +54,36 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Author-association values are defined by GitHub's REST/GraphQL API docs as one of:
+      # OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, NONE,
+      # MANNEQUIN. Only OWNER/MEMBER/COLLABORATOR (the repo's actual maintainers) are "trusted"
+      # here — everyone else (including CONTRIBUTOR, which GitHub assigns to people who have
+      # previously merged a PR) is treated as untrusted for the purpose of spending paid LLM
+      # budget, since that status is still something an attacker could build up cheaply over
+      # time with throwaway low-value PRs.
+      - name: Determine author trust level (LLM cost gate)
+        id: trust
+        env:
+          ASSOCIATION: ${{ github.event.pull_request.author_association || github.event.issue.author_association }}
+        run: |
+          echo "Author association for this event: $ASSOCIATION"
+          if [ "$ASSOCIATION" = "OWNER" ] || [ "$ASSOCIATION" = "MEMBER" ] || [ "$ASSOCIATION" = "COLLABORATOR" ]; then
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+            echo "-> trusted: LLM-grade triage will run if a provider key is configured."
+          else
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+            echo "-> untrusted: skipping paid LLM call; heuristic triage will run instead."
+          fi
+
       - name: Run triage bot
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Only forward the paid provider keys for trusted authors (see "Determine author
+          # trust level" above). Untrusted/anonymous authors still get triaged — just via the
+          # free heuristicTriage fallback in scripts/triage-bot.ts, which runs automatically
+          # whenever neither key is present in the environment.
+          ANTHROPIC_API_KEY: ${{ steps.trust.outputs.trusted == 'true' && secrets.ANTHROPIC_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ steps.trust.outputs.trusted == 'true' && secrets.OPENAI_API_KEY || '' }}
           TRIAGE_ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: npm run triage-bot
 

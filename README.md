@@ -4,9 +4,14 @@
 
 **An agent that investigates open GitHub issues with tools, then rules on them.**
 
-> A **GitHub-webhook-triggered autonomous agent bot**, not a human-clicked UI
-> demo — see [Production usage](#production-usage) for the webhook run, issue,
-> and comment it produced on its own, plus the measured accuracy benchmark in
+> An **autonomous agent bot triggered by GitHub Actions' own event system**
+> (genuinely webhook-driven under the hood — GitHub Actions is built on
+> GitHub's internal webhook/event delivery — but there is no custom HTTP
+> webhook receiver endpoint in this repo to audit; see
+> [.github/workflows/triage.yml](.github/workflows/triage.yml) for the actual
+> trigger), not a human-clicked UI demo — see
+> [Production usage](#production-usage) for the run, issue, and comment it
+> produced on its own, plus the measured accuracy benchmark in
 > [ACCURACY.md](ACCURACY.md).
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -97,10 +102,10 @@ flowchart LR
   S -->|GITHUB_TOKEN| LB[Issue labels]
 ```
 
-- **Trigger:** a real GitHub webhook (`issues: [opened]`, also `pull_request_target: [opened]`), delivered by GitHub itself when anyone opens an issue — not a manual run.
+- **Trigger:** GitHub Actions' own `issues: [opened]` / `pull_request_target: [opened]` events — these are genuinely delivered by GitHub's internal webhook/event system, not a manual run, but note this repo has no custom HTTP webhook receiver; the trigger is entirely GitHub Actions' built-in `on:` config in [.github/workflows/triage.yml](.github/workflows/triage.yml), so there's no signature-verification code path to review here.
 - **Logic reuse:** `scripts/triage-bot.ts` imports the exact same `lib/agent.ts` agent loop, `lib/tools.ts` tools and `lib/triage.ts` schema the browser UI uses; it just swaps the browser's `fetch`-based "paste your key" flow for a Node/CI environment.
 - **Writes to GitHub autonomously:** the workflow's built-in `GITHUB_TOKEN` is enough to post a triage comment and apply labels — no new secret required for that part.
-- **LLM reasoning (optional):** if `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is present as a repository secret (Settings → Secrets and variables → Actions), the bot calls that provider for the kind/priority/duplicate/reply reasoning, same as the browser app.
+- **LLM reasoning (optional):** if `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is present as a repository secret (Settings → Secrets and variables → Actions), the bot calls that provider for the kind/priority/duplicate/reply reasoning, same as the browser app. **On `pull_request_target` events (PRs can come from any anonymous fork) the workflow only forwards these paid keys when `author_association` is `OWNER`/`MEMBER`/`COLLABORATOR`** — everyone else's PR still gets triaged, just via the free heuristic fallback below, so an anonymous account can't run up the repo owner's LLM bill. See the cost-gate comment in [.github/workflows/triage.yml](.github/workflows/triage.yml) for the full reasoning.
 - **Heuristic fallback (documented, no fabricated LLM usage):** with neither secret configured, `scripts/triage-bot.ts` runs a deterministic, keyword/overlap-based triage (see `heuristicTriage` in the script) so the full pipeline — trigger → investigate → comment → label — still produces real output end-to-end, clearly labeled `_Automated heuristic triage (no LLM key configured)_` in the posted comment.
 - **Evidence it runs:**
   - Example run (triggered by the real `issues.opened` webhook, 22s, green): https://github.com/edgeorgie/triage-desk/actions/runs/37983913473
