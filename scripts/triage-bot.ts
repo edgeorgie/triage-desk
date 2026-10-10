@@ -118,6 +118,18 @@ async function main() {
     return;
   }
 
+  // Idempotency guard: GitHub Actions can redeliver/retry the triggering event (manual
+  // re-run, or GitHub retrying a stuck job), which would otherwise post a second duplicate
+  // triage comment on the same issue/PR. Our own prior comment is identifiable by the
+  // "Posted by .github/workflows/triage.yml" marker line above, so check for it first.
+  const MARKER = "Posted by [.github/workflows/triage.yml]";
+  const { data: existingComments } = await octokit.issues.listComments({ owner: OWNER, repo: REPO, issue_number: ISSUE_NUMBER, per_page: 100 });
+  const alreadyPosted = existingComments.some((c) => (c.body ?? "").includes(MARKER));
+  if (alreadyPosted) {
+    console.log("[triage-bot] a triage comment already exists on this issue/PR — skipping duplicate post (idempotency guard).");
+    return;
+  }
+
   await octokit.issues.createComment({ owner: OWNER, repo: REPO, issue_number: ISSUE_NUMBER, body: commentBody });
   const labels = [...new Set([result.kind, result.priority, ...result.labels])].filter(Boolean);
   if (labels.length) await octokit.issues.addLabels({ owner: OWNER, repo: REPO, issue_number: ISSUE_NUMBER, labels });

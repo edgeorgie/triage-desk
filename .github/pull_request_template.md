@@ -14,3 +14,7 @@ What changed in `docs/spec` and why. Behavior changes start there.
 ## Out of scope
 
 What this change deliberately does not do.
+
+## Sign-off
+
+- [ ] Reviewed and approved by @edgeorgie before merge
