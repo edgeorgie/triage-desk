@@ -92,6 +92,7 @@ export class AnthropicAdapter implements Adapter {
     this.messages = [{ role: "user", content: user }];
   }
   async next(): Promise<ModelTurn> {
+    const workspaceId = process.env.ANTHROPIC_WORKSPACE_ID;
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -99,6 +100,11 @@ export class AnthropicAdapter implements Adapter {
         "x-api-key": this.key,
         "anthropic-version": "2023-06-01",
         "anthropic-dangerous-direct-browser-access": "true",
+        // Org-scoped API keys (not scoped to a single workspace) are
+        // rejected by Anthropic with a 400 unless this header identifies
+        // which workspace to bill/run under. Harmless to omit when the key
+        // is already workspace-scoped.
+        ...(workspaceId ? { "anthropic-workspace-id": workspaceId } : {}),
       },
       body: JSON.stringify({
         model: PROVIDERS.anthropic.model,
