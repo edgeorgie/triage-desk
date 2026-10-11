@@ -86,6 +86,9 @@ jobs:
           OPENAI_API_KEY: ${{ steps.trust.outputs.trusted == 'true' && secrets.OPENAI_API_KEY || '' }}
           ANTHROPIC_WORKSPACE_ID: ${{ steps.trust.outputs.trusted == 'true' && secrets.ANTHROPIC_WORKSPACE_ID || '' }}
           TRIAGE_ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          # A public project token and not a paid resource, so it is forwarded for every author. Empty
+          # (secret unset) keeps the bot's analytics off; see docs/adr/0003.
+          POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}
         run: npm run triage-bot
 
       - name: Upload triage log
