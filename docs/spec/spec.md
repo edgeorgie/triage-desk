@@ -87,6 +87,7 @@ Status: Implemented, not verified end to end.
 - Given any event, then it contains only counts, booleans, durations in milliseconds, enumerations and the public repository name; never an issue title, body, comment, username, provider key, token or ruling text.
 - Given the web app, then analytics uses no cookies or browser storage, builds no person profiles, does not autocapture or record sessions, and respects Do Not Track.
 - Given the Vercel deployment, then events go through the same-origin `/ingest` path; given the Pages export, then its content security policy allows the PostHog hosts in `script-src` and `connect-src` only when `NEXT_PUBLIC_POSTHOG_HOST` is set at deploy.
+- Given no `NEXT_PUBLIC_POSTHOG_KEY` on the Vercel deployment, then the app registers no `/ingest` route at all, so it forwards nothing to PostHog; the proxy is a server-side route and exists only when a key is set.
 
 Non-goals:
 

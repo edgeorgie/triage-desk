@@ -20,7 +20,7 @@ The page builds an adapter for the chosen provider and runs the loop with the op
 
 ## Analytics
 
-Analytics is opt-in per deployment (FR-9). The build pins `NEXT_PUBLIC_POSTHOG_KEY` in `next.config.ts` so an unset key becomes `""` and the dynamic import of the SDK is dead code: a build without a key emits no analytics chunk, which was checked on both the Vercel build and the Pages export. On Vercel the SDK posts to `/ingest`, rewritten to PostHog by `next.config.ts`; a static export cannot rewrite, so its deploy names the host and `scripts/csp.mjs` allows it. The bot imports `posthog-node` only when `POSTHOG_KEY` is set and awaits `shutdown()` before it exits.
+Analytics is opt-in per deployment (FR-9). The build pins `NEXT_PUBLIC_POSTHOG_KEY` in `next.config.ts` so an unset key becomes `""` and the dynamic import of the SDK is dead code: a build without a key emits no analytics chunk, which was checked on both the Vercel build and the Pages export. On Vercel the SDK posts to `/ingest`, rewritten to PostHog by `next.config.ts`, which registers those rewrites only when a key is set (a server-side route would otherwise relay anything posted to it); a static export cannot rewrite, so its deploy names the host and `scripts/csp.mjs` allows it. The bot imports `posthog-node` only when `POSTHOG_KEY` is set and awaits `shutdown()` before it exits.
 
 ## Decisions
 
