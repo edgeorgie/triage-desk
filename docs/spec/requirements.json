@@ -143,7 +143,8 @@
       "Given any event, then it carries app (triage-desk) and surface (web or bot), its name is object_verb and its properties are snake_case.",
       "Given any event, then it contains only counts, booleans, durations in milliseconds, enumerations and the public repository name; never an issue title, body, comment, username, provider key, token or ruling text.",
       "Given the web app, then analytics uses no cookies or browser storage, builds no person profiles, does not autocapture or record sessions, and respects Do Not Track.",
-      "Given the Vercel deployment, then events go through the same-origin /ingest path; given the Pages export, then its content security policy allows the PostHog hosts in script-src and connect-src only when NEXT_PUBLIC_POSTHOG_HOST is set at deploy."
+      "Given the Vercel deployment, then events go through the same-origin /ingest path; given the Pages export, then its content security policy allows the PostHog hosts in script-src and connect-src only when NEXT_PUBLIC_POSTHOG_HOST is set at deploy.",
+      "Given no NEXT_PUBLIC_POSTHOG_KEY on the Vercel deployment, then the app registers no /ingest route at all, so it forwards nothing to PostHog; the proxy is a server-side route and exists only when a key is set."
     ],
     "implementation": [
       "lib/analytics.ts",
@@ -162,8 +163,9 @@
     "tests": [
       "tests/analytics.test.ts",
       "tests/analytics-node.test.ts",
-      "tests/csp.test.ts"
+      "tests/csp.test.ts",
+      "tests/ingest-proxy.test.ts"
     ],
-    "evidence": "manual: No key: Vercel build and Pages export built from clean trees, `grep -rli posthog .next/static out` empty, and in headless Chromium the Vercel build made no analytics request, wrote no cookie or storage and printed nothing to the console. Control build with a key emits the 315 KB SDK chunk, lazily. With a fake key in Chromium (requests to /ingest stubbed): only same-origin /ingest requests, no cookies or storage from analytics, `$pageview` carried origin and path, `triage_requested` carried only `repo`, and a planted issue title, body, username and API key appeared in no payload. `/ingest` rewrites checked against the live host (asset 200 through rule 1, trailing-slash POST not redirected). Bot run against a real issue in dry run: without a key `posthog-node` is never resolved and nothing is sent; with a key one `issue_triaged` is flushed before exit, also on the invalid-event and failure paths (requests intercepted). Not exercised: delivery to a PostHog project with a real token."
+    "evidence": "manual: No key: Vercel build and Pages export built from clean trees, `grep -rli posthog .next/static out` empty, and in headless Chromium the Vercel build made no analytics request, wrote no cookie or storage and printed nothing to the console. Control build with a key emits the 315 KB SDK chunk, lazily. With a fake key in Chromium (requests to /ingest stubbed): only same-origin /ingest requests, no cookies or storage from analytics, `$pageview` carried origin and path, `triage_requested` carried only `repo`, and a planted issue title, body, username and API key appeared in no payload. `/ingest` rewrites checked against the live host (asset 200 through rule 1, trailing-slash POST not redirected); with no key the config registers no `/ingest` rewrite (asserted by calling its `rewrites()`), so the app is not a relay. Bot run against a real issue in dry run: without a key `posthog-node` is never resolved and nothing is sent; with a key one `issue_triaged` is flushed before exit, also on the invalid-event and failure paths (requests intercepted). Not exercised: delivery to a PostHog project with a real token."
   }
 ]
