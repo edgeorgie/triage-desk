@@ -17,6 +17,7 @@ import { listIssues, readRepoFile, toIssue } from "../lib/github.ts";
 import type { Issue } from "../lib/github.ts";
 import { heuristicTriage } from "../lib/heuristic-triage.ts";
 import type { TriageResult } from "../lib/triage.ts";
+import { createBotAnalytics } from "../lib/analytics-node.ts";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
@@ -25,11 +26,11 @@ const OPENAI_KEY = process.env.OPENAI_API_KEY ?? "";
 const [OWNER, REPO] = (process.env.GITHUB_REPOSITORY ?? "").split("/");
 const ISSUE_NUMBER = Number(process.env.TRIAGE_ISSUE_NUMBER ?? process.env.ISSUE_NUMBER ?? NaN);
 const DRY_RUN = process.env.TRIAGE_DRY_RUN === "1";
+const repoFull = `${OWNER}/${REPO}`;
+// Decided from the environment alone, so a run that fails early can still report which model path it took.
+const mode = ANTHROPIC_KEY ? "anthropic" : OPENAI_KEY ? "openai" : "heuristic";
 
-if (!OWNER || !REPO || !Number.isInteger(ISSUE_NUMBER)) {
-  console.error("Missing GITHUB_REPOSITORY or TRIAGE_ISSUE_NUMBER/ISSUE_NUMBER.");
-  process.exit(1);
-}
+type Outcome = "posted" | "dry_run" | "already_posted" | "failed";
 
 const octokit = new Octokit({ auth: GITHUB_TOKEN || undefined });
 
@@ -58,8 +59,7 @@ function toSubmitInput(r: TriageResult): Record<string, unknown> {
   return { kind: r.kind, priority: r.priority, labels: r.labels, duplicate_of: r.duplicateOf, summary: r.summary, needs_info: r.needsInfo, reply: r.reply, confidence: r.confidence };
 }
 
-async function main() {
-  const repoFull = `${OWNER}/${REPO}`;
+async function main(): Promise<{ outcome: Outcome; labelsApplied: number }> {
   console.log(`[triage-bot] ${repoFull}#${ISSUE_NUMBER} dry_run=${DRY_RUN}`);
 
   const pool = await listIssues(OWNER, REPO, 50, GITHUB_TOKEN);
@@ -72,7 +72,6 @@ async function main() {
 
   const ctx: ToolContext = { owner: OWNER, repo: REPO, target, pool, readFile: (p) => readRepoFile(OWNER, REPO, p, GITHUB_TOKEN) };
   const steps: Step[] = [];
-  const mode = ANTHROPIC_KEY ? "anthropic" : OPENAI_KEY ? "openai" : "heuristic";
   console.log(`[triage-bot] mode=${mode}`);
 
   let result: TriageResult;
@@ -115,7 +114,7 @@ async function main() {
 
   if (DRY_RUN) {
     console.log("[triage-bot] TRIAGE_DRY_RUN=1 set — skipping GitHub write calls.");
-    return;
+    return { outcome: "dry_run", labelsApplied: 0 };
   }
 
   // Idempotency guard: GitHub Actions can redeliver/retry the triggering event (manual
@@ -127,16 +126,41 @@ async function main() {
   const alreadyPosted = existingComments.some((c) => (c.body ?? "").includes(MARKER));
   if (alreadyPosted) {
     console.log("[triage-bot] a triage comment already exists on this issue/PR — skipping duplicate post (idempotency guard).");
-    return;
+    return { outcome: "already_posted", labelsApplied: 0 };
   }
 
   await octokit.issues.createComment({ owner: OWNER, repo: REPO, issue_number: ISSUE_NUMBER, body: commentBody });
   const labels = [...new Set([result.kind, result.priority, ...result.labels])].filter(Boolean);
   if (labels.length) await octokit.issues.addLabels({ owner: OWNER, repo: REPO, issue_number: ISSUE_NUMBER, labels });
   console.log(`[triage-bot] posted comment and applied labels: ${labels.join(", ")}`);
+  return { outcome: "posted", labelsApplied: labels.length };
 }
 
-main().catch((e) => {
+/** Reports one `issue_triaged` per run, failures included, and flushes before the process ends (docs/adr/0003). */
+async function run() {
+  if (!OWNER || !REPO || !Number.isInteger(ISSUE_NUMBER)) {
+    console.error("Missing GITHUB_REPOSITORY or TRIAGE_ISSUE_NUMBER/ISSUE_NUMBER.");
+    const analytics = await createBotAnalytics(process.env.GITHUB_REPOSITORY ?? "");
+    analytics.capture("webhook_rejected", { reason: "invalid_event" });
+    await analytics.shutdown();
+    process.exit(1);
+  }
+  const analytics = await createBotAnalytics(repoFull);
+  const started = Date.now();
+  const report = (outcome: Outcome, labelsApplied = 0) =>
+    analytics.capture("issue_triaged", { repo: repoFull, labels_applied: labelsApplied, model: mode, latency_ms: Date.now() - started, outcome });
+  try {
+    const { outcome, labelsApplied } = await main();
+    report(outcome, labelsApplied);
+  } catch (e) {
+    report("failed");
+    throw e;
+  } finally {
+    await analytics.shutdown();
+  }
+}
+
+run().catch((e) => {
   console.error("[triage-bot] failed:", e);
   process.exit(1);
 });

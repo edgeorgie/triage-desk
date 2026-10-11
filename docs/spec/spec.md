@@ -76,7 +76,27 @@ Status: Verified.
 
 - Given the Pages export, then every page carries a Content-Security-Policy meta tag that allows scripts only from the site and from the hashes of its inline scripts, and connections only to the site, api.anthropic.com, api.openai.com, api.github.com and raw.githubusercontent.com.
 
+### FR-9 Product analytics, off without a key
+
+Status: Implemented, not verified end to end.
+
+- Given no `NEXT_PUBLIC_POSTHOG_KEY` when the web app is built, then neither the Vercel build nor the Pages export contains analytics code (nothing in the client output mentions PostHog), and the browser downloads no analytics script and makes no analytics request.
+- Given no `POSTHOG_KEY` when the bot runs, then the analytics SDK is not loaded and nothing is sent.
+- Given a key, then the web app sends `$pageview` and `triage_requested` (`repo`: the public `owner/name`), and the bot sends `issue_triaged` (`repo`, `labels_applied`, `model`, `latency_ms`, `outcome`) and `webhook_rejected` (`reason`); the bot flushes its events before the process exits.
+- Given any event, then it carries `app` (`triage-desk`) and `surface` (`web` or `bot`), its name is `object_verb` and its properties are `snake_case`.
+- Given any event, then it contains only counts, booleans, durations in milliseconds, enumerations and the public repository name; never an issue title, body, comment, username, provider key, token or ruling text.
+- Given the web app, then analytics uses no cookies or browser storage, builds no person profiles, does not autocapture or record sessions, and respects Do Not Track.
+- Given the Vercel deployment, then events go through the same-origin `/ingest` path; given the Pages export, then its content security policy allows the PostHog hosts in `script-src` and `connect-src` only when `NEXT_PUBLIC_POSTHOG_HOST` is set at deploy.
+
+Non-goals:
+
+- Identifying people, cookies or a consent banner.
+- Autocapture, session replay, feature flags, experiments or error tracking.
+- Sending user content, or reporting anything from the CI workflows beyond the bot's two events.
+- Changing product behavior, visuals or copy.
+
 ## Open risks
 
 - Token overlap similarity misses paraphrased duplicates.
 - Unauthenticated GitHub calls are limited to 60 per hour.
+- Delivery of analytics events to a PostHog project with a real token has not been exercised, and the project must have "Discard client IP data" enabled because the browser SDK's own `ip` option has no effect.

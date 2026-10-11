@@ -40,7 +40,7 @@ Open **https://triage-desk-iota.vercel.app**, enter any public `owner/name` repo
 - **Auditable.** A timeline shows every tool call the agent made.
 - **Fast to drive.** Keyboard shortcuts, batch triage of five issues, JSON export.
 - **Read-only in the browser.** The browser app never writes to GitHub; a human applies the ruling. The CI bot below is the one exception, scoped to its own workflow token.
-- **Bring your own key.** Anthropic or OpenAI, entered in the browser. No server, no environment variables.
+- **Bring your own key.** Anthropic or OpenAI, entered in the browser. No server and no required environment variables.
 - **Runs unattended too.** A GitHub Actions bot (`scripts/triage-bot.ts`) triages every new issue automatically — see [Production usage](#production-usage).
 
 ## How it works
@@ -71,7 +71,7 @@ npm ci
 npm run dev
 ```
 
-Open http://localhost:3000. There are no environment variables: click **Add API key**, choose Anthropic or OpenAI and paste your key. The key stays in your browser.
+Open http://localhost:3000. There are no required environment variables (analytics is optional, see [Analytics](#analytics)): click **Add API key**, choose Anthropic or OpenAI and paste your key. The key stays in your browser.
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fedgeorgie%2Ftriage-desk)
 
@@ -85,8 +85,32 @@ Open http://localhost:3000. There are no environment variables: click **Add API 
 | Issue text and tool results | Sent to the chosen model provider | Not stored |
 | Provider key | Sent only to the provider | `sessionStorage` by default; `localStorage` only if you choose to remember it on this device |
 | Rulings | Kept in memory, exported on request | Not stored |
+| Usage analytics | Only when the deployment sets a key; counts and the public `owner/name`, never issue text or keys (see [Analytics](#analytics)) | No cookies or browser storage |
 
 Issue text is untrusted input to an agent with tools. Blast radius is limited: tools are read-only, file paths are guarded, the loop is capped at 8 steps and the ruling is schema-validated. A hostile issue could still mislead the ruling, so a human applies it.
+
+## Analytics
+
+Optional and off by default: without a key there is no analytics code in the web bundle, no request, and the bot never loads its SDK. Analytics is cookieless (no banner needed), builds no person profiles, does not autocapture or record sessions, and respects Do Not Track. It sends counts, booleans, durations, enumerations and the public `owner/name` of a repository; it never sends issue titles, bodies, comments, usernames, rulings, replies, provider keys or tokens. The decision and its limits are in [ADR 0003](docs/adr/0003-cookieless-analytics-off-without-a-key.md).
+
+| Variable | Where | Purpose |
+|---|---|---|
+| `NEXT_PUBLIC_POSTHOG_KEY` | Web app, build time (Vercel project environment) | Public PostHog project token. Unset: no analytics code is built in. |
+| `NEXT_PUBLIC_POSTHOG_HOST` | Web app, build time, GitHub Pages deploy only | `https://us.i.posthog.com`. Leave unset on Vercel, where events go through `/ingest` on the app's own origin. The Pages export cannot proxy, so with a key it needs this, and `npm run deploy:pages` then allows the PostHog hosts in the page's content security policy. |
+| `POSTHOG_KEY` | Triage bot, run time (repository secret `POSTHOG_KEY`, forwarded by `.github/workflows/triage.yml`) | Same project token for the bot's events. Unset: nothing is sent. |
+
+Set "Discard client IP data" in the PostHog project settings: the browser SDK's `ip` option has no effect. [.env.example](.env.example) lists the variables.
+
+Every event carries `app` (`triage-desk`) and `surface` (`web` or `bot`).
+
+| Event | Surface | Fires | Properties |
+|---|---|---|---|
+| `$pageview` | web | Page load and route change | `$current_url` (origin and path, no query or fragment) |
+| `triage_requested` | web | A ruling run starts (`R`, `Enter`, the button, or each issue of a batch) | `repo` (public `owner/name`) |
+| `issue_triaged` | bot | Once per bot run, failures included | `repo`, `labels_applied` (count), `model` (provider path: `anthropic`, `openai` or `heuristic`), `latency_ms`, `outcome` (`posted`, `dry_run`, `already_posted` or `failed`) |
+| `webhook_rejected` | bot | The triggering event lacks a repository or issue number | `reason` (`invalid_event`) |
+
+The bot identifies an installation by the SHA-256 of its lower-cased repository name, never by a person, and awaits a flush before the process exits.
 
 ## Production usage
 
