@@ -9,3 +9,4 @@ Use GitHub's private vulnerability reporting on this repository (Security tab, R
 - API keys are entered by the user and stored in the browser. They are sent only to the provider the user selects. Any script injection on the origin could read them, so do not paste keys into untrusted deployments.
 - User content (notes, screenshots, prompts) is processed in the browser. The README lists what is sent to a model provider.
 - Model output is validated and rendered as text, never as HTML.
+- Optional analytics is off unless a deployment sets a key. It sends counts, durations, enumerations and the public repository name, never issue text, rulings or provider keys; see [ADR 0003](docs/adr/0003-cookieless-analytics-off-without-a-key.md).
