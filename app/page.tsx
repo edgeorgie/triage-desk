@@ -6,6 +6,7 @@ import Ledger from "@/components/Ledger";
 import Ruling from "@/components/Ruling";
 import { PROVIDERS, SYSTEM_PROMPT, createAdapter, runAgent, userPrompt } from "@/lib/agent";
 import type { Provider, Step } from "@/lib/agent";
+import { track } from "@/lib/analytics";
 import { handlesOwnKeys } from "@/lib/keys";
 import { clearKeys, readKeys, writeKeys } from "@/lib/keystore";
 import { listIssues, parseRepo } from "@/lib/github";
@@ -128,6 +129,7 @@ export default function Home() {
     setSteps([]);
     runningRef.current = true;
     setRunning(true);
+    track("triage_requested", { repo: `${repo.owner}/${repo.repo}` });
     const controller = new AbortController();
     abort.current = controller;
     try {
