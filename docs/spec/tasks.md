@@ -28,28 +28,49 @@ implementations, tests and traceability rows but never got a task row at all, an
 `spec.md` and `traceability.md` and never opened this file.
 
 A gate that certifies a document it does not read is worse than no gate: the green tick is
-what stops anyone from reading it by hand. A cold review of the first version of that fix found
-the same disease one level down — the row parser matched line by line, so a table inside an HTML
-comment or a fenced code block counted as real work items. A `tasks.md` holding nothing but a
-commented-out table passed green, and because the commented lines inflated the row count they
-also satisfied the zero-row guard meant to catch exactly that. The anti-vacuous guard was itself
+what stops anyone from reading it by hand. Two independent cold reviews then found the same
+disease one layer down each time, which is the honest history of this section.
+
+The first review showed the row parser matched line by line, so a table inside an HTML comment
+or a fenced code block counted as real work items. A `tasks.md` holding nothing but a
+commented-out table passed green — and because the commented lines inflated the row count, they
+also satisfied the zero-row guard added to catch exactly that. The anti-vacuous guard was itself
 vacuous.
+
+The second review landed eight further bypasses against the fix for the first, because every
+test written for it exercised only the fixture already known to be correct, never a boundary. A
+blank line did not end the table, so a fake row one line below the real one still counted —
+"first table only" was asserted in a comment and never implemented. A four-backtick fence was
+closed by a three-backtick line inside it, leaking fence state and hiding ten of the eleven real
+rows. An inline `<!-- -->` deleted the row carrying it. Pull request links to *any* repository on
+GitHub were accepted, and only the first link in a cell was graded. Requirement headings at depth
+one or indented four spaces vanished silently, which was the exact case the fix claimed to have
+handled.
 
 `scripts/check-spec.mjs` now asserts that
 
 - every `FR-n` declared in `spec.md` is claimed by at least one row in this table,
 - no row cites an `FR-n` that does not exist in `spec.md`,
-- rows are read only from the first markdown table, skipping comments and code fences,
-- every row has exactly five columns, so the Requirements cell cannot be read from the wrong
-  position, and
-- every row's Pull request cell holds a real link whose label matches its target. That column
-  used to carry no weight at all: rewriting every row to point at `#1` passed green, and T-6
-  shipped citing the wrong pull request for precisely that reason — the CSP work came from
-  [#16](https://github.com/edgeorgie/triage-desk/pull/16), not
-  [#11](https://github.com/edgeorgie/triage-desk/pull/11).
+- rows come only from the first table, which a blank line ends, with comments stripped inline and
+  fenced blocks tracked by their opening delimiter,
+- every row has exactly five columns — counting pipes inside inline code and escaped pipes as
+  text, not separators — so the Requirements cell cannot be read from the wrong position,
+- every link in a row's Pull request cell points at a pull request *in this repository* and
+  agrees with its own label, and
+- every row's Status is one of `Merged`, `In review`, `In progress` or `Abandoned`.
 
-Requirement ids are also read from any heading depth now. `^### ` alone would have silently
-dropped a requirement demoted to `####`, removing it from the gate rather than failing it.
+Requirement ids are read from a heading at any depth and any indentation, and a heading inside a
+fenced block does not declare one. A `spec.md` yielding zero requirements reports a parser
+failure rather than a clean sheet.
+
+**What this gate does not and cannot check.** The Pull request column is graded for *shape*, not
+truth: a self-consistent citation of the wrong pull request still passes. T-6 originally
+attributed FR-8 to [#11](https://github.com/edgeorgie/triage-desk/pull/11) when the CSP work came
+from [#16](https://github.com/edgeorgie/triage-desk/pull/16), and no offline check can catch that
+— only a reader or a network call can. Likewise the Status column is checked against a closed set
+of values but not against whether its pull request really merged, for the same reason. Both are
+stated here rather than implied as covered, because the whole point of this section is that a
+gate claiming more than it enforces is the original bug.
 
 Quality-only work (refactors, CI hardening, security guards that map to no single requirement)
 is recorded as `none (quality)`. That is deliberate: forcing such work to invent a requirement

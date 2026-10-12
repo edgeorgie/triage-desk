@@ -12,18 +12,46 @@ import { fileURLToPath } from "node:url";
 // correctness is unverified by anything executable is the same defect it exists to catch.
 
 /**
- * Requirement ids declared by the specification, read from any heading depth.
+ * Requirement ids declared by the specification, read from a heading at ANY depth.
  *
  * `^### ` alone silently dropped a requirement demoted to `####` or indented under a list, which
  * removes it from the gate entirely rather than failing it — a parser that loses its subject is
- * the exact failure mode this check exists to prevent.
+ * the exact failure mode this check exists to prevent. A review then showed the first attempt at
+ * "any depth" still missed `#` (depth one) and anything indented four spaces or more, i.e. the
+ * exact "indented under a list" case it claimed to handle. Depth and indentation are now
+ * genuinely unbounded, and a heading inside a fenced code block is excluded so an example in the
+ * prose cannot invent a requirement.
  */
 export function requirementIds(spec) {
-  return [...spec.matchAll(/^\s{0,3}#{2,6}\s+(FR-\d+)/gm)].map((m) => m[1]);
+  const ids = [];
+  let inFence = false;
+  for (const raw of spec.split("\n")) {
+    if (fenceDelimiter(raw.trim())) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const m = raw.match(/^\s*#+\s+(FR-\d+)\b/);
+    if (m) ids.push(m[1]);
+  }
+  return ids;
 }
 
 /**
- * Work-item rows from the FIRST markdown table in tasks.md, as arrays of trimmed cells.
+ * True when a trimmed line opens or closes a fenced code block.
+ *
+ * Markdown allows any run of three or more backticks or tildes, so a four-backtick fence can
+ * contain a three-backtick line. A boolean toggle flipped on the inner line and leaked fence
+ * state across the rest of the document, hiding ten of eleven real work items while the gate
+ * stayed green. Callers must therefore track the opening delimiter, not just a flag.
+ */
+function fenceDelimiter(line) {
+  const m = line.match(/^(`{3,}|~{3,})/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Work-item rows from the contract table in tasks.md, as arrays of trimmed cells.
  *
  * Block-aware on purpose. A line-at-a-time `/^\|\s*T-\d+/` accepted rows inside HTML comments
  * and fenced code blocks, so a tasks.md holding nothing but a commented-out table passed green —
@@ -31,43 +59,83 @@ export function requirementIds(spec) {
  * catch exactly that, making the anti-vacuous guard itself vacuous. Merely documenting the row
  * format inside that file was enough to neuter the gate.
  *
- * Only the first table counts: a second table elsewhere in the document used to satisfy coverage
- * just as well, letting a requirement be "claimed" by a row no reader would take as a work item.
+ * Only the FIRST table counts, and a blank line ends it. The first attempt at this ended the
+ * table only on a non-blank, non-table line, so a fake row one blank line below the real table
+ * was still accepted — "first table only" was asserted in a comment and not implemented, and its
+ * test passed only because the fixture happened to separate the tables with prose.
  */
 export function taskTableRows(tasks) {
   const rows = [];
-  let inFence = false;
+  let fence = null;
   let inComment = false;
   let seenTable = false;
 
   for (const raw of tasks.split("\n")) {
-    const line = raw.trim();
+    let line = raw.trim();
 
-    if (!inComment && /^(```|~~~)/.test(line)) {
-      inFence = !inFence;
+    // Fence state is keyed on the opening delimiter: only an equal-or-longer run of the same
+    // character closes it, so an inner shorter fence cannot flip it.
+    const delim = fenceDelimiter(line);
+    if (fence) {
+      if (delim && delim[0] === fence[0] && delim.length >= fence.length) fence = null;
       continue;
     }
-    if (inFence) continue;
-
-    // A comment may open and close on one line, so check for the terminator before latching.
-    if (!inComment && line.includes("<!--")) {
-      inComment = !line.includes("-->");
+    if (!inComment && delim) {
+      fence = delim;
       continue;
     }
+
+    // Comments are stripped rather than skipped by line. An inline `<!-- … -->` used to discard
+    // the whole line, which deleted real rows from the gate's view — including a row whose cells
+    // then escaped the pull-request grader entirely.
     if (inComment) {
-      if (line.includes("-->")) inComment = false;
+      const end = line.indexOf("-->");
+      if (end === -1) continue;
+      line = line.slice(end + 3).trim();
+      inComment = false;
+    }
+    while (true) {
+      const open = line.indexOf("<!--");
+      if (open === -1) break;
+      const close = line.indexOf("-->", open + 4);
+      if (close === -1) {
+        line = line.slice(0, open).trim();
+        inComment = true;
+        break;
+      }
+      line = (line.slice(0, open) + line.slice(close + 3)).trim();
+    }
+    if (line === "") {
+      // A blank line ends the contract table. Everything further down the document — prose,
+      // a second table, an appendix — is outside it by construction.
+      if (seenTable) break;
       continue;
     }
 
     if (line.startsWith("|")) {
       seenTable = true;
-      if (/^\|\s*T-\d+/.test(line)) rows.push(line.split("|").map((c) => c.trim()));
+      if (/^\|\s*T-\d+/.test(line)) rows.push(splitRow(line));
       continue;
     }
-    // A non-blank, non-table line after the table began ends it: everything below is prose.
-    if (seenTable && line !== "") break;
+    if (seenTable) break;
   }
   return rows;
+}
+
+/**
+ * Split a table row into trimmed cells, honouring the two ways markdown hides a pipe.
+ *
+ * A naive `split("|")` counted an escaped `\|` and a pipe inside inline code as real column
+ * separators, so a legitimate row whose title contains either was rejected as malformed. Inline
+ * code spans are blanked before splitting and escapes are unescaped afterwards, so the cell text
+ * a reader sees is the cell text the checks grade.
+ */
+function splitRow(line) {
+  const PLACEHOLDER = "\u0000";
+  const masked = line
+    .replace(/\\\|/g, PLACEHOLDER)
+    .replace(/`[^`]*`/g, (span) => span.replace(/\|/g, PLACEHOLDER));
+  return masked.split("|").map((c) => c.replace(new RegExp(PLACEHOLDER, "g"), "|").trim());
 }
 
 // `| T-n | PR | branch | requirements | status |` splits into a leading and trailing empty cell
@@ -78,6 +146,7 @@ const EXPECTED_CELLS = 7;
 const TASK_INDEX = 1;
 const PR_INDEX = 2;
 const REQUIREMENTS_INDEX = 4;
+const STATUS_INDEX = 5;
 
 /**
  * Every problem found in the three specification documents, as human-readable strings.
@@ -129,19 +198,49 @@ export function checkSpec({ spec, trace, tasks, exists = existsSync }) {
     wellFormed.flatMap((cells) => [...cells[REQUIREMENTS_INDEX].matchAll(/FR-\d+/g)].map((m) => m[0])),
   );
 
-  // The Pull request column is graded too. Rewriting every row's link to `#1` used to pass green,
-  // so the column that makes a row auditable carried no weight at all — and T-6 shipped citing
-  // the wrong pull request for exactly that reason.
+  // The Pull request column is graded, because the column that makes a row auditable otherwise
+  // carries no weight: rewriting every row's link to `#1` used to pass green, and T-6 shipped
+  // citing the wrong pull request for exactly that reason.
+  //
+  // Scope, stated honestly: this grades a citation's SHAPE, not its truth. It cannot know that
+  // the CSP work came from #16 rather than #11 — a self-consistent citation of the wrong pull
+  // request still passes, and only a human or a network call can catch that. What it does
+  // enforce is that every link is well formed, points at THIS repository, and that every link in
+  // the cell agrees, so a wrong citation has to be deliberate rather than a typo nobody checked.
   for (const cells of wellFormed) {
     const cell = cells[PR_INDEX];
-    if (!/\[#\d+\]\(https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+\)/.test(cell)) {
+    const links = [...cell.matchAll(/\[#(\d+)\]\((\S+?)\)/g)];
+    if (links.length === 0) {
       problems.push(`${cells[TASK_INDEX]} has no pull request link in its Pull request column`);
       continue;
     }
-    const label = cell.match(/\[#(\d+)\]/)?.[1];
-    const target = cell.match(/\/pull\/(\d+)\)/)?.[1];
-    if (label !== target) {
-      problems.push(`${cells[TASK_INDEX]} links to pull request #${target} but is labelled #${label}`);
+    // Every link is graded, not just the first: a cell used to pass on one honest link while
+    // carrying others that pointed anywhere at all.
+    for (const [, label, url] of links) {
+      // Anchored on both ends against this repository. An unanchored `[^/]+/[^/]+` accepted a
+      // link to any repo on GitHub, which is precisely how a row could cite work that is not
+      // this repo's and still read as traceable.
+      const m = url.match(/^https:\/\/github\.com\/edgeorgie\/triage-desk\/pull\/(\d+)$/);
+      if (!m) {
+        problems.push(`${cells[TASK_INDEX]} cites #${label} with a link that is not an edgeorgie/triage-desk pull request: ${url}`);
+        continue;
+      }
+      if (label !== m[1]) {
+        problems.push(`${cells[TASK_INDEX]} links to pull request #${m[1]} but is labelled #${label}`);
+      }
+    }
+  }
+
+  // The Status column is graded against a closed enum. The original bug had two halves — a
+  // missing row AND a row reading `In review` long after its pull request merged — and only the
+  // first half was closed. Whether a pull request is really merged needs the network, so that
+  // stays out of an offline gate; what is checkable here is that the value is one the project
+  // actually defines, so a typo or an invented status cannot sit in the table unnoticed.
+  const STATUSES = new Set(["Merged", "In review", "In progress", "Abandoned"]);
+  for (const cells of wellFormed) {
+    const status = cells[STATUS_INDEX];
+    if (!STATUSES.has(status)) {
+      problems.push(`${cells[TASK_INDEX]} has status "${status}", expected one of: ${[...STATUSES].join(", ")}`);
     }
   }
 

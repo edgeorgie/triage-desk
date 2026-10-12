@@ -151,3 +151,116 @@ test("this repository's own specification documents pass", () => {
   });
   assert.deepEqual(problems, []);
 });
+
+// --- the bypasses a SECOND independent cold review landed --------------------------------------
+//
+// The tests above were written against the fixtures the author had already fixed, so every one of
+// them passed while eight further bypasses worked against the real documents. That is the same
+// failure shape as the round before it: a guard validated only at the point it was already known
+// to be correct. These cases are deliberately written at the boundaries instead.
+
+test("a blank line ends the contract table, so a row below it does not satisfy coverage", () => {
+  // The first attempt ended the table only on a non-blank non-table line, so this smuggled row
+  // was accepted — "first table only" was asserted in a comment and never implemented. The test
+  // that claimed to cover it passed only because its fixture separated the tables with prose.
+  const tasks = `# Tasks\n
+| Task | Pull request | Branch | Requirements | Status |
+|---|---|---|---|---|
+${row("T-1 First", 1, "FR-1")}
+
+${row("T-9 Smuggled", 9, "FR-2")}
+`;
+  assert.deepEqual(taskTableRows(tasks).map((c: string[]) => c[1]), ["T-1 First"]);
+  assert.deepEqual(run({ tasks }), ["FR-2 is in spec.md but no tasks.md work item claims it"]);
+});
+
+test("a four-backtick fence is not closed by a three-backtick line inside it", () => {
+  // A boolean fence toggle flipped on the inner line and leaked fence state across the rest of
+  // the document, hiding every row that followed while the gate stayed green.
+  const tasks = `# Tasks\n\n\`\`\`\`\n\`\`\`\n\`\`\`\`\n
+| Task | Pull request | Branch | Requirements | Status |
+|---|---|---|---|---|
+${row("T-1 First", 1, "FR-1")}
+${row("T-2 Second", 2, "FR-2")}
+`;
+  assert.equal(taskTableRows(tasks).length, 2);
+  assert.deepEqual(run({ tasks }), []);
+});
+
+test("a tilde fence is not closed by a backtick fence", () => {
+  const tasks = `# Tasks\n\n~~~\n\`\`\`\n~~~\n
+| Task | Pull request | Branch | Requirements | Status |
+|---|---|---|---|---|
+${row("T-1 First", 1, "FR-1")}
+${row("T-2 Second", 2, "FR-2")}
+`;
+  assert.deepEqual(run({ tasks }), []);
+});
+
+test("an inline HTML comment does not delete the row that carries it", () => {
+  // Skipping the whole line removed a real row from the gate's view, so its cells escaped the
+  // pull request grader entirely — a row could hide a bad citation behind a comment.
+  const tasks = TASKS.replace(
+    row("T-2 Second", 2, "FR-2"),
+    `| T-2 Second <!-- renamed --> | [#2](https://github.com/edgeorgie/triage-desk/pull/2) | \`branch\` | FR-2 | Merged |`,
+  );
+  assert.equal(taskTableRows(tasks).length, 2);
+  assert.deepEqual(run({ tasks }), []);
+});
+
+test("a pull request link to a different repository is rejected", () => {
+  // `[^/]+/[^/]+` accepted any repo on GitHub, which is exactly how a row could cite work that
+  // is not this repo's and still read as traceable.
+  const tasks = TASKS.replace(
+    "https://github.com/edgeorgie/triage-desk/pull/2",
+    "https://github.com/torvalds/linux/pull/2",
+  );
+  assert.deepEqual(run({ tasks }), [
+    "T-2 Second cites #2 with a link that is not an edgeorgie/triage-desk pull request: https://github.com/torvalds/linux/pull/2",
+  ]);
+});
+
+test("every link in the Pull request cell is graded, not only the first", () => {
+  const tasks = TASKS.replace(
+    "[#2](https://github.com/edgeorgie/triage-desk/pull/2)",
+    "[#2](https://github.com/edgeorgie/triage-desk/pull/2) and [#3](https://github.com/other/repo/pull/3)",
+  );
+  assert.deepEqual(run({ tasks }), [
+    "T-2 Second cites #3 with a link that is not an edgeorgie/triage-desk pull request: https://github.com/other/repo/pull/3",
+  ]);
+});
+
+test("a pipe inside inline code or escaped does not make a legitimate row malformed", () => {
+  const tasks = TASKS.replace(
+    "| T-2 Second |",
+    "| T-2 Second `a|b` and c\\|d |",
+  );
+  const problems = run({ tasks });
+  assert.ok(!problems.some((p) => p.includes("columns, expected 5")), problems.join("; "));
+  assert.deepEqual(problems, []);
+});
+
+test("a requirement heading is found at depth one and when deeply indented", () => {
+  assert.deepEqual(requirementIds("# FR-10 top level\n"), ["FR-10"]);
+  assert.deepEqual(requirementIds("        #### FR-11 deeply indented\n"), ["FR-11"]);
+});
+
+test("a requirement heading inside a fenced code block is not a declaration", () => {
+  assert.deepEqual(requirementIds("### FR-1 real\n\n```\n### FR-99 an example\n```\n"), ["FR-1"]);
+});
+
+test("a status outside the project's closed set is reported", () => {
+  // The original bug had two halves and only the missing-row half was closed. Merge state needs
+  // the network, but an invented or mistyped status is checkable offline.
+  const tasks = TASKS.replace("| FR-2 | Merged |", "| FR-2 | NOT DONE |");
+  assert.deepEqual(run({ tasks }), [
+    'T-2 Second has status "NOT DONE", expected one of: Merged, In review, In progress, Abandoned',
+  ]);
+});
+
+test("the legitimate statuses are all accepted", () => {
+  for (const status of ["Merged", "In review", "In progress", "Abandoned"]) {
+    const tasks = TASKS.replace("| FR-2 | Merged |", `| FR-2 | ${status} |`);
+    assert.deepEqual(run({ tasks }), [], `status ${status} should be accepted`);
+  }
+});
