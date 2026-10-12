@@ -1,6 +1,18 @@
 # Traceability: triage-desk
 
-Every requirement maps to implementation files and to tests or manual evidence. `npm run spec:check` enforces that each requirement has an implementation, that files exist, and that there is a test or a manual note.
+Every requirement maps to implementation files and to tests or manual evidence.
+
+**`docs/spec/requirements.json` is the source of truth for requirement identity.** This table is
+reconciled against it, cell by cell, by `npm run spec:check` — the gate does not discover which
+requirements exist by reading this file or `spec.md`. That inversion is deliberate: five rounds of
+review each found a way to hide a line of markdown from the gate, which removed a requirement from
+grading entirely while the printed count moved quietly with it. A hidden row is now a
+reconciliation failure naming the requirement, because the expected id is declared somewhere no
+markdown construct can reach.
+
+A requirement id must be a plain ASCII `FR-<n>`. A confusable spelling — a zero-width joiner
+inside it, a bidi override before it, a fullwidth or lowercase form of it — is a hard error naming
+the offending characters, never a silently different id.
 
 | Requirement | Implementation | Tests | Evidence | Status |
 |---|---|---|---|---|

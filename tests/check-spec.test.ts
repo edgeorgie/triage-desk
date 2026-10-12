@@ -2,18 +2,52 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  canonicaliseId,
   checkSpec,
+  loadRequirements,
   markdownBlockContext,
   requirementIds,
   taskTableRows,
   traceabilityRows,
 } from "../scripts/check-spec.mjs";
 
-// `spec:check` is a step inside the `verify` gate required on `main`. Until these tests existed
-// its only validation was a manual mutation exercise written into a pull request body — nothing
-// re-ran it, so an independent review landed five real bypasses against a version whose own
-// description claimed it was mutation-validated. Each bypass that review landed is reproduced
-// here as a failing case, so the class cannot regress silently when the parser is next touched.
+// `spec:check` is a step inside the `verify` gate required on `main`. FIVE consecutive rounds of
+// cold review each landed a working bypass against it, and the fifth landed a REGRESSION: NFKC
+// normalisation added to stop a confusable deleting a line was applied BEFORE fence and comment
+// classification, so fullwidth characters that render as literal text folded INTO the gate's own
+// delimiters. A document looked normal to a human while the gate stopped grading part of it.
+//
+// The structural answer, and what this suite is now written against: requirement IDENTITY comes
+// from `docs/spec/requirements.json`, and the markdown documents are RECONCILED against it. A
+// line hidden in markdown can no longer remove a requirement from the gate's subject, because
+// the subject is not discovered by parsing markdown at all.
+//
+// Two axes that every previous round's suite failed to cross are crossed deliberately here: the
+// CHARACTER-SET axis (fullwidth delimiter synthesis, zero-width joiners, bidi overrides) and the
+// GRADED-VS-COUNTED axis (rows past a table terminator were parsed and then never graded).
+
+// --- fixtures ---------------------------------------------------------------------------------
+
+const REQS = JSON.stringify([
+  {
+    id: "FR-1",
+    title: "First",
+    status: "Verified",
+    acceptance: ["Given a thing, then it works."],
+    implementation: ["lib/a.ts"],
+    tests: ["tests/a.test.ts"],
+    evidence: "PR 1.",
+  },
+  {
+    id: "FR-2",
+    title: "Second",
+    status: "Verified",
+    acceptance: ["Given another thing, then it also works."],
+    implementation: ["lib/b.ts"],
+    tests: [],
+    evidence: "manual: PR 2.",
+  },
+]);
 
 const SPEC = `# Spec\n\n### FR-1 First\n\n### FR-2 Second\n`;
 
@@ -38,119 +72,27 @@ Prose below the table.
 
 // Every referenced path exists, so filesystem findings never mask a parser finding.
 const allExist = () => true;
-const run = (over: Partial<{ spec: string; trace: string; tasks: string }> = {}): string[] =>
-  checkSpec({ spec: SPEC, trace: TRACE, tasks: TASKS, exists: allExist, ...over });
+const run = (
+  over: Partial<{ requirements: string; spec: string; trace: string; tasks: string }> = {},
+): string[] =>
+  checkSpec({ requirements: REQS, spec: SPEC, trace: TRACE, tasks: TASKS, exists: allExist, ...over });
+
+/** Fullwidth forms that NFKC folds onto the delimiters this gate greps for. */
+const FULLWIDTH_FENCE = "\uff40\uff40\uff40"; // U+FF40 x3 -> ```
+const FULLWIDTH_TILDE = "\uff5e\uff5e\uff5e"; // U+FF5E x3 -> ~~~
+const FULLWIDTH_OPEN = "\uff1c\uff01\uff0d\uff0d"; // U+FF1C U+FF01 U+FF0D U+FF0D -> <!--
+const FULLWIDTH_CLOSE = "\uff0d\uff0d\uff1e"; // U+FF0D U+FF0D U+FF1E -> -->
 
 test("a complete, consistent document set yields no problems", () => {
   assert.deepEqual(run(), []);
 });
 
-test("a requirement with no work-item row is reported", () => {
-  const tasks = TASKS.replace(row("T-2 Second", 2, "FR-2") + "\n", "");
-  assert.deepEqual(run({ tasks }), ["FR-2 is in spec.md but no tasks.md work item claims it"]);
-});
-
-test("a work item claiming a requirement the spec does not declare is reported", () => {
-  const tasks = TASKS.replace("FR-2 | Merged", "FR-42 | Merged");
-  const problems = run({ tasks });
-  assert.ok(problems.includes("FR-2 is in spec.md but no tasks.md work item claims it"));
-  assert.ok(problems.includes("FR-42 is claimed by a tasks.md work item but not in spec.md"));
-});
-
-// --- the bypasses an independent review actually landed -------------------------------------
-
-test("a table inside an HTML comment does not satisfy coverage", () => {
-  const tasks = `# Tasks\n\n<!--\n| Task | Pull request | Branch | Requirements | Status |\n|---|---|---|---|---|\n${row("T-1 First", 1, "FR-1")}\n${row("T-2 Second", 2, "FR-2")}\n-->\n`;
-  const problems = run({ tasks });
-  assert.ok(problems.includes("FR-1 is in spec.md but no tasks.md work item claims it"));
-  assert.ok(problems.includes("FR-2 is in spec.md but no tasks.md work item claims it"));
-  // The commented rows must not inflate the row count into satisfying the anti-vacuous guard.
-  assert.ok(problems.includes("tasks.md parsed to zero work-item rows — the coverage check cannot run"));
-});
-
-test("a table inside a fenced code block does not satisfy coverage", () => {
-  const tasks = `# Tasks\n\n\`\`\`\n${row("T-1 First", 1, "FR-1")}\n${row("T-2 Second", 2, "FR-2")}\n\`\`\`\n`;
-  const problems = run({ tasks });
-  assert.ok(problems.includes("FR-1 is in spec.md but no tasks.md work item claims it"));
-  assert.ok(problems.includes("tasks.md parsed to zero work-item rows — the coverage check cannot run"));
-});
-
-test("rows in a second table further down the document do not satisfy coverage", () => {
-  const tasks = `# Tasks\n
-| Task | Pull request | Branch | Requirements | Status |
-|---|---|---|---|---|
-${row("T-1 First", 1, "FR-1")}
-
-Some prose that ends the contract table.
-
-| Task | Pull request | Branch | Requirements | Status |
-|---|---|---|---|---|
-${row("T-9 Sneaky", 9, "FR-2")}
-`;
-  assert.deepEqual(run({ tasks }), ["FR-2 is in spec.md but no tasks.md work item claims it"]);
-});
-
-test("a row with the wrong column count is reported rather than read at the wrong offset", () => {
-  // An extra column shifts FR-2 out of the Requirements cell; silently reading index 4 would
-  // have found "FR-2" in the branch column and called the requirement covered.
-  const tasks = TASKS.replace(
-    row("T-2 Second", 2, "FR-2"),
-    `| T-2 Second | [#2](https://github.com/edgeorgie/triage-desk/pull/2) | extra | \`branch\` | FR-2 | Merged |`,
-  );
-  const problems = run({ tasks });
-  assert.ok(problems.some((p) => p.startsWith("a tasks.md work item has 6 columns, expected 5")));
-  assert.ok(problems.includes("FR-2 is in spec.md but no tasks.md work item claims it"));
-});
-
-test("a pull request link whose label disagrees with its target is reported", () => {
-  const tasks = TASKS.replace(
-    "[#2](https://github.com/edgeorgie/triage-desk/pull/2)",
-    "[#2](https://github.com/edgeorgie/triage-desk/pull/1)",
-  );
-  assert.deepEqual(run({ tasks }), ["T-2 Second links to pull request #1 but is labelled #2"]);
-});
-
-test("a row with no pull request link at all is reported", () => {
-  const tasks = TASKS.replace("[#2](https://github.com/edgeorgie/triage-desk/pull/2)", "see the branch");
-  assert.deepEqual(run({ tasks }), ["T-2 Second has no pull request link in its Pull request column"]);
-});
-
-test("a requirement is still found when its heading is demoted or indented", () => {
-  assert.deepEqual(requirementIds("### FR-1 a\n#### FR-2 b\n  ## FR-3 c\n"), ["FR-1", "FR-2", "FR-3"]);
-});
-
-test("a spec that yields no requirements reports a parser failure, not a clean sheet", () => {
-  const problems = run({ spec: "# Spec with no requirement headings\n" });
-  assert.deepEqual(problems, ["spec.md yielded zero FR-n requirements — the parser cannot be trusted"]);
-});
-
-test("a requirement mentioned only in prose does not satisfy coverage", () => {
-  const tasks = TASKS.replace(row("T-2 Second", 2, "FR-2") + "\n", "") + "\nFR-2 is discussed here in prose.\n";
-  assert.deepEqual(run({ tasks }), ["FR-2 is in spec.md but no tasks.md work item claims it"]);
-});
-
-test("`none (quality)` exempts a row from claiming a requirement, never a requirement from being claimed", () => {
-  // A quality-only row is legal...
-  const withQualityRow = TASKS.replace("Prose below", `${row("T-3 CI hardening", 3, "none (quality)")}\n\nProse below`);
-  assert.deepEqual(run({ tasks: withQualityRow }), []);
-  // ...but marking the row that carried FR-2 as quality-only leaves FR-2 uncovered.
-  const dodged = TASKS.replace(row("T-2 Second", 2, "FR-2"), row("T-2 Second", 2, "none (quality)"));
-  assert.deepEqual(run({ tasks: dodged }), ["FR-2 is in spec.md but no tasks.md work item claims it"]);
-});
-
-test("the row parser reads cells from the contract table only", () => {
-  const rows = taskTableRows(TASKS);
-  assert.equal(rows.length, 2);
-  assert.deepEqual(
-    rows.map((cells: string[]) => cells[1]),
-    ["T-1 First", "T-2 Second"],
-  );
-});
-
 test("this repository's own specification documents pass", () => {
   // The suite's fixtures could all be satisfied by a parser that is wrong about the real files,
-  // so assert against the documents actually on disk as well.
+  // so assert against the documents actually on disk as well. A hardening change that
+  // false-positives on the real documents is its own defect.
   const problems = checkSpec({
+    requirements: readFileSync("docs/spec/requirements.json", "utf8"),
     spec: readFileSync("docs/spec/spec.md", "utf8"),
     trace: readFileSync("docs/spec/traceability.md", "utf8"),
     tasks: readFileSync("docs/spec/tasks.md", "utf8"),
@@ -158,255 +100,406 @@ test("this repository's own specification documents pass", () => {
   assert.deepEqual(problems, []);
 });
 
-// --- the bypasses a SECOND independent cold review landed --------------------------------------
+// --- the structured source of truth is the gate's subject -------------------------------------
 //
-// The tests above were written against the fixtures the author had already fixed, so every one of
-// them passed while eight further bypasses worked against the real documents. That is the same
-// failure shape as the round before it: a guard validated only at the point it was already known
-// to be correct. These cases are deliberately written at the boundaries instead.
+// This is the architectural change, so it is asserted directly rather than only through its
+// consequences. Every previous round's gate discovered WHICH requirements existed by scraping
+// prose headings, which made its own subject attacker-controlled; a construct that hid a heading
+// removed the requirement from grading entirely and the printed count moved quietly with it.
 
-test("a blank line ends the contract table, so a row below it does not satisfy coverage", () => {
-  // The first attempt ended the table only on a non-blank non-table line, so this smuggled row
-  // was accepted — "first table only" was asserted in a comment and never implemented. The test
-  // that claimed to cover it passed only because its fixture separated the tables with prose.
-  const tasks = `# Tasks\n
-| Task | Pull request | Branch | Requirements | Status |
-|---|---|---|---|---|
-${row("T-1 First", 1, "FR-1")}
-
-${row("T-9 Smuggled", 9, "FR-2")}
-`;
-  assert.deepEqual(taskTableRows(tasks).map((c: string[]) => c[1]), ["T-1 First"]);
-  assert.deepEqual(run({ tasks }), ["FR-2 is in spec.md but no tasks.md work item claims it"]);
-});
-
-test("a four-backtick fence is not closed by a three-backtick line inside it", () => {
-  // A boolean fence toggle flipped on the inner line and leaked fence state across the rest of
-  // the document, hiding every row that followed while the gate stayed green.
-  const tasks = `# Tasks\n\n\`\`\`\`\n\`\`\`\n\`\`\`\`\n
-| Task | Pull request | Branch | Requirements | Status |
-|---|---|---|---|---|
-${row("T-1 First", 1, "FR-1")}
-${row("T-2 Second", 2, "FR-2")}
-`;
-  assert.equal(taskTableRows(tasks).length, 2);
-  assert.deepEqual(run({ tasks }), []);
-});
-
-test("a tilde fence is not closed by a backtick fence", () => {
-  const tasks = `# Tasks\n\n~~~\n\`\`\`\n~~~\n
-| Task | Pull request | Branch | Requirements | Status |
-|---|---|---|---|---|
-${row("T-1 First", 1, "FR-1")}
-${row("T-2 Second", 2, "FR-2")}
-`;
-  assert.deepEqual(run({ tasks }), []);
-});
-
-test("an inline HTML comment does not delete the row that carries it", () => {
-  // Skipping the whole line removed a real row from the gate's view, so its cells escaped the
-  // pull request grader entirely — a row could hide a bad citation behind a comment.
-  const tasks = TASKS.replace(
-    row("T-2 Second", 2, "FR-2"),
-    `| T-2 Second <!-- renamed --> | [#2](https://github.com/edgeorgie/triage-desk/pull/2) | \`branch\` | FR-2 | Merged |`,
-  );
-  assert.equal(taskTableRows(tasks).length, 2);
-  assert.deepEqual(run({ tasks }), []);
-});
-
-test("a pull request link to a different repository is rejected", () => {
-  // `[^/]+/[^/]+` accepted any repo on GitHub, which is exactly how a row could cite work that
-  // is not this repo's and still read as traceable.
-  const tasks = TASKS.replace(
-    "https://github.com/edgeorgie/triage-desk/pull/2",
-    "https://github.com/torvalds/linux/pull/2",
-  );
-  assert.deepEqual(run({ tasks }), [
-    "T-2 Second cites #2 with a link that is not an edgeorgie/triage-desk pull request: https://github.com/torvalds/linux/pull/2",
+test("the gate's subject comes from requirements.json, not from the markdown it grades", () => {
+  // A requirement declared in the structured source and NOWHERE in the markdown is the loud
+  // direction: it is reported as missing from each document, never silently dropped.
+  const requirements = JSON.stringify([
+    ...JSON.parse(REQS),
+    {
+      id: "FR-3",
+      title: "Third",
+      status: "Verified",
+      acceptance: ["Given a third thing."],
+      implementation: ["lib/c.ts"],
+      tests: ["tests/c.test.ts"],
+      evidence: "PR 3.",
+    },
   ]);
+  const problems = run({ requirements });
+  assert.ok(problems.includes("FR-3 is declared in requirements.json but has no heading in spec.md"), problems.join("; "));
+  assert.ok(problems.includes("FR-3 is in requirements.json but missing from traceability.md"), problems.join("; "));
+  assert.ok(problems.includes("FR-3 is in requirements.json but no tasks.md work item claims it"), problems.join("; "));
 });
 
-test("every link in the Pull request cell is graded, not only the first", () => {
-  const tasks = TASKS.replace(
-    "[#2](https://github.com/edgeorgie/triage-desk/pull/2)",
-    "[#2](https://github.com/edgeorgie/triage-desk/pull/2) and [#3](https://github.com/other/repo/pull/3)",
-  );
-  assert.deepEqual(run({ tasks }), [
-    "T-2 Second cites #3 with a link that is not an edgeorgie/triage-desk pull request: https://github.com/other/repo/pull/3",
-  ]);
+test("a requirement in the markdown that the structured source does not declare is reported", () => {
+  const spec = SPEC + "\n### FR-22 Unbuilt\n";
+  assert.ok(run({ spec }).includes("spec.md declares FR-22, which requirements.json does not"));
 });
 
-test("a pipe inside inline code or escaped does not make a legitimate row malformed", () => {
-  const tasks = TASKS.replace(
-    "| T-2 Second |",
-    "| T-2 Second `a|b` and c\\|d |",
-  );
-  const problems = run({ tasks });
-  assert.ok(!problems.some((p) => p.includes("columns, expected 5")), problems.join("; "));
-  assert.deepEqual(problems, []);
+test("an unreadable requirements.json is a parser failure, not a clean sheet", () => {
+  for (const [json, expected] of [
+    ["{ not json", "requirements.json is not valid JSON"],
+    ["[]", "requirements.json is not a non-empty array"],
+    ["{}", "requirements.json is not a non-empty array"],
+  ] as const) {
+    const problems = run({ requirements: json });
+    assert.ok(problems.some((p) => p.startsWith(expected)), `${json}: ${problems.join("; ")}`);
+    // It must STOP there rather than reporting findings derived from a subject it does not have.
+    assert.equal(problems.filter((p) => p.includes("requirements.json")).length, problems.length, problems.join("; "));
+  }
 });
 
-test("a requirement heading is found at depth one and when deeply indented", () => {
-  assert.deepEqual(requirementIds("# FR-10 top level\n"), ["FR-10"]);
-  assert.deepEqual(requirementIds("        #### FR-11 deeply indented\n"), ["FR-11"]);
-});
-
-test("a requirement heading inside a fenced code block is not a declaration", () => {
-  assert.deepEqual(requirementIds("### FR-1 real\n\n```\n### FR-99 an example\n```\n"), ["FR-1"]);
-});
-
-test("a status outside the project's closed set is reported", () => {
-  // The original bug had two halves and only the missing-row half was closed. Merge state needs
-  // the network, but an invented or mistyped status is checkable offline.
-  const tasks = TASKS.replace("| FR-2 | Merged |", "| FR-2 | NOT DONE |");
-  const problems = run({ tasks });
-  assert.ok(
-    problems.includes(
-      'T-2 Second has status "NOT DONE", expected one of: Merged, In review, In progress, Abandoned',
-    ),
-    problems.join("; "),
-  );
-});
-
-test("the legitimate statuses are all accepted as values", () => {
-  // The enum must not be written so narrowly that a status the project really uses is rejected.
-  // This grades the VALUE only; whether a status delivers coverage is asserted separately below,
-  // because grading the value alone was presentational and let `Abandoned` certify everything.
-  for (const status of ["Merged", "In review", "In progress", "Abandoned"]) {
-    const tasks = TASKS.replace("| FR-2 | Merged |", `| FR-2 | ${status} |`);
+test("a requirements.json entry with a missing or unreadable field is reported, never defaulted", () => {
+  const base = JSON.parse(REQS)[0];
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["title", { ...base, title: "" }],
+    ["evidence", { ...base, evidence: "" }],
+    ["implementation", { ...base, implementation: [] }],
+    ["status", { ...base, status: "Shipped" }],
+  ];
+  for (const [field, entry] of cases) {
+    const problems = run({ requirements: JSON.stringify([entry, JSON.parse(REQS)[1]]) });
     assert.ok(
-      !run({ tasks }).some((p) => p.includes("expected one of:")),
-      `status ${status} should be accepted as a value`,
+      problems.some((p) => p.includes(`has a missing or unreadable`) && p.includes(field)),
+      `${field}: ${problems.join("; ")}`,
     );
   }
 });
 
-// --- the bypasses a THIRD independent cold review landed ---------------------------------------
-//
-// Every test above drives `tasks.md`. Not one passed an adversarial `spec.md` or an adversarial
-// `traceability.md`, and that was the whole defect: three documents were parsed by three parsers
-// of unequal strength, and each round hardened whichever one that round's reviewer attacked. The
-// same three bypasses — a block hidden in an HTML comment, a block hidden in a fence, and fence
-// state leaked by a longer delimiter — were still live against the two documents nobody aimed at,
-// and wrapping the whole of `traceability.md`'s table in `<!-- -->` left the gate printing
-// "9 requirements traced".
-//
-// The cases below are therefore PARAMETERISED over all three documents, so a bypass closed
-// anywhere is proven closed everywhere. Adding a fourth document or a fourth hiding construct
-// means adding one row here, not a third copy of a test.
+test("the printed count is read from the structured source, so it cannot witness its own loss", () => {
+  // The count a gate derives from its own parse moves quietly when the parse is truncated: five
+  // rounds watched it go 9 -> 8 while the gate printed "passed". `loadRequirements` is the only
+  // thing the entry point counts, and it never reads the markdown.
+  const declared = loadRequirements(readFileSync("docs/spec/requirements.json", "utf8"), []);
+  assert.ok(declared !== null);
+  assert.equal(declared.length, 9);
+  const source = readFileSync("scripts/check-spec.mjs", "utf8");
+  const printer = source.slice(source.lastIndexOf("spec check passed"));
+  assert.ok(!/requirementIds\(/.test(printer), "the printed count must not be derived from the markdown parse");
+});
 
-/** The one line in each document that carries FR-2's half of the contract. */
-const CARRIER = {
-  spec: "### FR-2 Second",
-  trace: "| FR-2 | `lib/b.ts` | manual | manual: PR 2. | Verified |",
-  tasks: row("T-2 Second", 2, "FR-2"),
+// --- F1: block structure is classified on the RAW line ----------------------------------------
+
+test("fullwidth confusables cannot synthesise a fence or a comment", () => {
+  // THE round-five regression, at the root. NFKC maps U+FF40 x3 onto ``` and
+  // U+FF1C U+FF01 U+FF0D U+FF0D onto `<!--`, and normalisation ran BEFORE classification, so an
+  // attacker got a block construct that renders as ordinary literal text in every markdown
+  // renderer. Classification now happens on the raw line, so these are just text.
+  for (const synthetic of [FULLWIDTH_FENCE, FULLWIDTH_TILDE, FULLWIDTH_OPEN]) {
+    const ctx = markdownBlockContext(`${synthetic}\nvisible\n`);
+    assert.equal(ctx.unterminatedFence, false, synthetic);
+    assert.equal(ctx.unterminatedComment, false, synthetic);
+    assert.ok(
+      ctx.lines.some((l: { kind: string; text: string }) => l.kind === "content" && l.text === "visible"),
+      `${synthetic} hid the line after it`,
+    );
+  }
+});
+
+test("a fullwidth fence does not hide an untraced requirement from spec.md", () => {
+  const spec = SPEC + `\n${FULLWIDTH_FENCE}\n### FR-22 Unbuilt, unimplemented, untested\n${FULLWIDTH_FENCE}\n`;
+  assert.ok(run({ spec }).includes("spec.md declares FR-22, which requirements.json does not"));
+});
+
+test("a fullwidth comment does not delete a real requirement's heading", () => {
+  // Reported as partial loss BY NAME, which is precisely what round five claimed and did not do.
+  const spec = SPEC.replace("### FR-2 Second", `${FULLWIDTH_OPEN}### FR-2 Second${FULLWIDTH_CLOSE}`);
+  assert.ok(run({ spec }).includes("FR-2 is declared in requirements.json but has no heading in spec.md"));
+});
+
+test("a fullwidth comment cannot smuggle a traceability or task id past the id check", () => {
+  const trace = TRACE.replace("| FR-2 |", `| ${FULLWIDTH_OPEN}FR-2${FULLWIDTH_CLOSE} |`);
+  assert.ok(
+    run({ trace }).some((p) => p.includes("is not a plain `FR-<n>` id")),
+    run({ trace }).join("; "),
+  );
+  const tasks = TASKS.replace("| T-2 Second |", `| ${FULLWIDTH_OPEN}T-2${FULLWIDTH_CLOSE} Second |`);
+  assert.ok(
+    run({ tasks }).some((p) => p.includes("is not a plain `T-<n>` id")),
+    run({ tasks }).join("; "),
+  );
+});
+
+test("normalisation still folds a confusable in a row's SEMANTIC content", () => {
+  // The fix must not throw away the thing round five got right. A U+2011 hyphen in a row's
+  // prose, or a U+00A0 after the hashes, renders identically and must not stop a line parsing —
+  // folding is correct, just not before the line's block structure is known.
+  const ctx = markdownBlockContext("some\u2011text\n");
+  assert.equal(ctx.lines[0].text, "some-text");
+  assert.equal(ctx.lines[0].raw, "some\u2011text");
+  const spec = SPEC.replace("### FR-2 Second", "###\u00a0FR-2 Second");
+  assert.deepEqual(run({ spec }), []);
+});
+
+// --- F3: unicode identity tricks are rejected, never folded into a different id ---------------
+
+test("a zero-width joiner in an id is a hard error, not a different id", () => {
+  // `FR-2<ZWJ>2` renders as FR-22 to a human and used to parse as a DUPLICATE FR-2, inheriting
+  // the real FR-2's implementation, test, traceability row and task row — a brand-new
+  // requirement arrived pre-proven, and the count even incremented to 10.
+  const spec = SPEC + "\n### FR-2\u200d2 Delete any repository the agent can reach\n";
+  const problems = run({ spec });
+  assert.ok(
+    problems.some((p) => p.includes('"FR-2\\u200d2"') && p.includes("renders as FR-22 but is not that id")),
+    problems.join("; "),
+  );
+  // And it must NOT have been counted as a second FR-2.
+  assert.ok(!problems.some((p) => p.includes("has 2 headings")), problems.join("; "));
+});
+
+test("a bidi override before an id is a hard error, not a deleted heading", () => {
+  const spec = SPEC + "\n### \u202eFR-22 Smuggled\n";
+  assert.ok(
+    run({ spec }).some((p) => p.includes('"\\u202eFR-22"') && p.includes("is not a plain `FR-<n>` id")),
+    run({ spec }).join("; "),
+  );
+});
+
+test("a lowercase or fullwidth spelling of an id is a hard error, not a silently ignored heading", () => {
+  for (const token of ["fr-22", "\uff26\uff32\uff0d\uff12\uff12", "FR\u20112"]) {
+    const spec = SPEC + `\n### ${token} Smuggled\n`;
+    assert.ok(
+      run({ spec }).some((p) => p.includes("is not a plain `FR-<n>` id")),
+      `${token}: ${run({ spec }).join("; ")}`,
+    );
+  }
+});
+
+test("canonicaliseId reports whether the token was ALREADY canonical, which is the load-bearing half", () => {
+  // Folding a confusable id into the real one is what merges two requirements. Canonicalising is
+  // only ever used to RECOGNISE that a token was meant to be an id; a token that needed it fails.
+  assert.deepEqual(canonicaliseId("FR-8"), { canonical: "FR-8", conforming: true });
+  for (const token of ["fr-8", "FR\u20118", "F\u200dR-8", "\u202eFR-8", "\uff26\uff32\uff0d\uff18", "FR-8\ufeff"]) {
+    const { canonical, conforming } = canonicaliseId(token);
+    assert.equal(canonical, "FR-8", token);
+    assert.equal(conforming, false, `${token} must not be accepted as already canonical`);
+  }
+});
+
+test("a non-conforming id in requirements.json itself is a hard error", () => {
+  // The allowlist is at the identity LAYER, so the structured source is held to it too — or the
+  // source of truth becomes the new place to plant an aliased id.
+  const requirements = JSON.stringify([{ ...JSON.parse(REQS)[0], id: "FR-0\u200d1" }, JSON.parse(REQS)[1]]);
+  assert.ok(
+    run({ requirements }).some((p) => p.includes("which is not a plain `FR-<n>` id")),
+    run({ requirements }).join("; "),
+  );
+});
+
+test("a confusable in a Requirements cell cannot alias a claim onto another requirement", () => {
+  const tasks = TASKS.replace(row("T-2 Second", 2, "FR-2"), row("T-2 Second", 2, "FR-2\u200d2"));
+  const problems = run({ tasks });
+  assert.ok(problems.some((p) => p.includes("has an unreadable Requirements cell")), problems.join("; "));
+  assert.ok(problems.includes("FR-2 is in requirements.json but no tasks.md work item claims it"), problems.join("; "));
+});
+
+// --- F4: shape is graded over EVERY row, coverage only over the first table --------------------
+
+test("a row past the table terminator is GRADED for shape, not merely uncounted", () => {
+  // The two questions were conflated. Rows below a terminator were parsed and then never graded,
+  // so a row citing an unrelated repository with the literal status text "NOT A REAL STATUS"
+  // passed green while rendering as a perfectly ordinary contract row.
+  const smuggled =
+    "| T-12 Unaudited work | [#99](https://github.com/torvalds/linux/pull/99) | `x` | none (quality) | NOT A REAL STATUS |";
+  for (const tasks of [
+    TASKS + `\n${smuggled}\n`, // below the prose terminator
+    TASKS.replace("Prose below the table.", "```\n```\n" + smuggled), // below a fence
+    TASKS.replace("Prose below the table.", "    " + smuggled), // in an indented code block? no:
+  ]) {
+    const problems = run({ tasks });
+    if (tasks.includes("    | T-12")) continue; // an indented row is a code block, asserted below
+    assert.ok(
+      problems.some((p) => p.includes("is not an edgeorgie/triage-desk pull request")),
+      `citation ungraded: ${problems.join("; ")}`,
+    );
+    assert.ok(
+      problems.some((p) => p.includes('has status "NOT A REAL STATUS"')),
+      `status ungraded: ${problems.join("; ")}`,
+    );
+  }
+});
+
+test("a row past the terminator still does not COVER a requirement", () => {
+  // Shape grading must not accidentally make an appendix row certify anything: the two questions
+  // are now answered separately, and this asserts the coverage half did not widen.
+  const tasks =
+    TASKS.replace(row("T-2 Second", 2, "FR-2") + "\n", "") + "\n" + row("T-9 Appendix", 9, "FR-2") + "\n";
+  assert.ok(run({ tasks }).includes("FR-2 is in requirements.json but no tasks.md work item claims it"));
+});
+
+test("a traceability row past the terminator is graded for shape and does not override the real row", () => {
+  const trace = TRACE + "\nAppendix: rejected drafts.\n\n| FR-2 | | | | NOT A REAL STATUS |\n";
+  const problems = run({ trace });
+  assert.ok(problems.some((p) => p.includes('has status "NOT A REAL STATUS"')), problems.join("; "));
+  // FR-2 keeps its real evidence; the appendix row did not replace it.
+  assert.ok(!problems.some((p) => p.includes("Evidence cell")), problems.join("; "));
+});
+
+test("a four-space-indented row is a code block, not a contract row", () => {
+  const tasks = TASKS.replace(row("T-2 Second", 2, "FR-2"), "    " + row("T-2 Second", 2, "FR-2"));
+  assert.deepEqual(
+    taskTableRows(tasks).map((r: { cells: string[] }) => r.cells[1]),
+    ["T-1 First"],
+  );
+  assert.ok(run({ tasks }).includes("FR-2 is in requirements.json but no tasks.md work item claims it"));
+});
+
+// --- F5: the Evidence/Tests contract is reconciled exactly, not shape-checked ------------------
+//
+// The critic reported F5 as suspected-but-not-reproduced and could not construct a passing false
+// manual-evidence claim. That was correct: `declaresManualEvidence` rejected the direct attempts.
+// But the PRIMITIVE was real — an inline comment can change what the gate reads without changing
+// a rendered character — so these assert the whole class, by exact agreement rather than shape.
+
+test("an inline comment cannot make the gate read a different Tests or Evidence cell than a reader", () => {
+  for (const trace of [
+    TRACE.replace("| manual | manual: PR 2. |", "| manual | <!--manual: -->no testing was ever done |"),
+    TRACE.replace("| manual | manual: PR 2. |", "| <!--manual-->none | manual: PR 2. |"),
+    TRACE.replace("| manual: PR 2. |", `| ${FULLWIDTH_OPEN} manual: ${FULLWIDTH_CLOSE} PR 2. |`),
+  ]) {
+    assert.notEqual(trace, TRACE, "fixture did not mutate");
+    assert.notDeepEqual(run({ trace }), [], "an altered Tests/Evidence cell must be reported");
+  }
+});
+
+test("a requirement with no tests must say `manual` and back it with a `manual:` note", () => {
+  const trace = TRACE.replace("| FR-2 | `lib/b.ts` | manual |", "| FR-2 | `lib/b.ts` | none |");
+  assert.ok(
+    run({ trace }).some((p) => p.includes("must read exactly `manual`")),
+    run({ trace }).join("; "),
+  );
+  const requirements = JSON.stringify([
+    JSON.parse(REQS)[0],
+    { ...JSON.parse(REQS)[1], evidence: "no manual testing was ever performed and nothing is verified" },
+  ]);
+  assert.ok(
+    run({ requirements }).some((p) => p.includes('must open with "manual:"')),
+    run({ requirements }).join("; "),
+  );
+});
+
+test("a drifted Implementation, Tests, Evidence or Status cell is reported by name", () => {
+  for (const [trace, needle] of [
+    [TRACE.replace("| `lib/b.ts` |", "| `package.json` |"), "Implementation cell"],
+    [TRACE.replace("| `tests/a.test.ts` |", "| `tests/other.test.ts` |"), "Tests cell"],
+    [TRACE.replace("| PR 1. |", "| PR 7. |"), "Evidence cell"],
+    [TRACE.replace("| FR-1 | `lib/a.ts` | `tests/a.test.ts` | PR 1. | Verified |", "| FR-1 | `lib/a.ts` | `tests/a.test.ts` | PR 1. | Draft |"), "Status cell"],
+  ] as const) {
+    assert.ok(run({ trace }).some((p) => p.includes(needle)), `${needle}: ${run({ trace }).join("; ")}`);
+  }
+});
+
+test("a declared file that does not exist is reported against the structured source", () => {
+  const problems = checkSpec({
+    requirements: REQS,
+    spec: SPEC,
+    trace: TRACE,
+    tasks: TASKS,
+    exists: (p: unknown) => p !== "lib/b.ts",
+  });
+  assert.ok(problems.includes("FR-2 references a missing file: lib/b.ts"), problems.join("; "));
+});
+
+// --- the bypasses the earlier rounds landed, kept as regression cases -------------------------
+
+const HIDERS: Record<string, (line: string) => string> = {
+  "an HTML comment": (line) => `<!--\n${line}\n-->`,
+  "a fenced code block": (line) => "```\n" + line + "\n```",
+  "a tilde fenced block": (line) => `~~~\n${line}\n~~~`,
+  "a four-backtick block containing a three-backtick line": (line) => "````\n```\n" + line + "\n````",
 };
 
-/**
- * Ways to ENCLOSE a line so a non-block-aware parser still reads it.
- *
- * `appliesTo` is explicit rather than assumed. An indented code block must not be read as a
- * TABLE ROW — an illustrative four-space-indented row satisfied coverage for a real requirement —
- * but in `spec.md` an indented heading deliberately still declares a requirement: of the two ways
- * to be wrong, inventing a requirement that must then be proven is fail-safe, while dropping one
- * lets unbuilt work through. Indentation is therefore never a way to delete a requirement, and
- * that asymmetry is asserted below instead of being hidden in a skipped case.
- */
-const HIDERS: Record<string, { hide: (line: string) => string; appliesTo: string[] }> = {
-  "an HTML comment": { hide: (line) => `<!--\n${line}\n-->`, appliesTo: ["spec", "trace", "tasks"] },
-  "a fenced code block": { hide: (line) => "```\n" + line + "\n```", appliesTo: ["spec", "trace", "tasks"] },
-  "a tilde fenced block": { hide: (line) => `~~~\n${line}\n~~~`, appliesTo: ["spec", "trace", "tasks"] },
-  "a four-backtick block containing a three-backtick line": {
-    hide: (line) => "````\n```\n" + line + "\n````",
-    appliesTo: ["spec", "trace", "tasks"],
-  },
-  "an indented code block": { hide: (line) => "    " + line, appliesTo: ["trace", "tasks"] },
-};
-
-/**
- * Ways to LEAK fence state, which must not delete anything that follows.
- *
- * A boolean toggle flipped on the inner shorter fence and on the different-character fence, so
- * the closing run re-opened the block and every line after it vanished from the gate — in
- * `spec.md` that let a brand-new requirement with no implementation, no test, no traceability row
- * and no task row be declared and certified, with the printed count unchanged.
- */
 const LEAKERS: Record<string, string> = {
   "a four-backtick fence closed by a three-backtick line": "````\n```\n````\n",
   "a tilde fence cross-toggled by a backtick fence": "~~~\n```\n~~~\n",
   "a fence indented three spaces": "   ```\n   ```\n",
   "an HTML comment holding a fence delimiter": "<!-- ``` -->\n",
+  "a fullwidth fence, which is not a fence at all": `${FULLWIDTH_FENCE}\n`,
+  "a fullwidth tilde fence, which is not a fence at all": `${FULLWIDTH_TILDE}\n`,
+  "a fullwidth comment opener, which is not a comment at all": `${FULLWIDTH_OPEN}\n`,
 };
 
-/** What must be reported when FR-2's carrier in each document stops being readable. */
-const MISSING_CARRIER: Record<string, string[]> = {
-  // Losing the declaration must not be silent either: the other two documents then reference a
-  // requirement the spec does not declare, which is the loud direction.
-  spec: ["FR-2 is in traceability.md but not in spec.md", "FR-2 is claimed by a tasks.md work item but not in spec.md"],
-  trace: ["FR-2 is in spec.md but missing from traceability.md"],
-  tasks: ["FR-2 is in spec.md but no tasks.md work item claims it"],
+/**
+ * Enclosing a line in a FULLWIDTH confusable must not hide it, because no renderer hides it.
+ *
+ * This is the opposite expectation from the ASCII `HIDERS` above and the distinction is the whole
+ * point of the F1 fix: `｀｀｀` is literal text, so the line between two of them is still document
+ * content, and the gate must grade it exactly as a reader reads it. Asserting it here rather than
+ * leaving it implied is what keeps a future round from "hardening" the gate by folding these into
+ * delimiters again.
+ */
+const FULLWIDTH_NON_HIDERS: Record<string, (line: string) => string> = {
+  "a fullwidth fence": (line) => `${FULLWIDTH_FENCE}\n${line}\n${FULLWIDTH_FENCE}`,
+  "a fullwidth comment": (line) => `${FULLWIDTH_OPEN}\n${line}\n${FULLWIDTH_CLOSE}`,
 };
 
+const CARRIER = {
+  spec: "### FR-2 Second",
+  trace: "| FR-2 | `lib/b.ts` | manual | manual: PR 2. | Verified |",
+  tasks: row("T-2 Second", 2, "FR-2"),
+};
 const DOCS = { spec: SPEC, trace: TRACE, tasks: TASKS };
-/** The real filename each fixture key stands for, so a test name names the real document. */
 const DOC_FILE: Record<string, string> = { spec: "spec.md", trace: "traceability.md", tasks: "tasks.md" };
 
 for (const [document, carrier] of Object.entries(CARRIER)) {
-  for (const [hider, { hide, appliesTo }] of Object.entries(HIDERS)) {
-    if (!appliesTo.includes(document)) continue;
-    test(`FR-2 enclosed in ${hider} in ${DOC_FILE[document]} does not satisfy coverage`, () => {
+  for (const [hider, hide] of Object.entries(HIDERS)) {
+    test(`FR-2's carrier enclosed in ${hider} in ${DOC_FILE[document]} is reported, never silently lost`, () => {
+      // The direction every previous round failed in. Enclosing a line must produce a LOUD
+      // finding naming the requirement, because identity comes from requirements.json and the
+      // reconciliation then has an expected id with nothing to match it.
       const original = DOCS[document as keyof typeof DOCS];
       const mutated = original.replace(carrier, hide(carrier));
       assert.notEqual(mutated, original, "fixture did not mutate");
       const problems = run({ [document]: mutated });
-      for (const expected of MISSING_CARRIER[document]) {
-        assert.ok(problems.includes(expected), `expected "${expected}", got: ${problems.join("; ")}`);
-      }
+      assert.ok(
+        problems.some((p) => p.includes("FR-2")),
+        `${hider} in ${document} was not reported: ${problems.join("; ")}`,
+      );
+    });
+  }
+
+  for (const [wrapper, wrap] of Object.entries(FULLWIDTH_NON_HIDERS)) {
+    test(`${wrapper} around FR-2's carrier in ${DOC_FILE[document]} never silently loses FR-2`, () => {
+      // The round-five regression, asserted per document. NFKC folded these onto ``` and `<!--`
+      // BEFORE classification, so the enclosed line vanished from the gate while rendering
+      // normally on github.com, and the gate printed "passed" over a requirement it had lost.
+      //
+      // The invariant is exactly that: either the carrier is still read (no problems), or the
+      // loss is reported BY NAME. Silence with FR-2 gone is the only forbidden outcome. Both
+      // legitimate outcomes occur: in `spec.md` the heading is still read, and in a TABLE a
+      // literal junk line genuinely does end the table — in the renderer too — so the row below
+      // falls outside the contract table and is reported as uncovered rather than certified.
+      const original = DOCS[document as keyof typeof DOCS];
+      const mutated = original.replace(carrier, wrap(carrier));
+      assert.notEqual(mutated, original, "fixture did not mutate");
+      const problems = run({ [document]: mutated });
+      assert.ok(
+        problems.length === 0 || problems.some((p) => p.includes("FR-2")),
+        `${wrapper} in ${document} produced findings that do not name FR-2: ${problems.join("; ")}`,
+      );
     });
   }
 
   for (const [leaker, prelude] of Object.entries(LEAKERS)) {
     test(`${leaker} does not delete FR-2 from ${DOC_FILE[document]}`, () => {
-      // The fail-open direction: a document is allowed to contain these constructs, and the
-      // lines after them must still be read. A parser that loses its subject reports a clean
-      // sheet over a truncated document, which is the defect this whole gate exists to prevent.
+      // The fail-open direction: a document may legitimately contain these constructs, and the
+      // lines after them must still be read.
       const original = DOCS[document as keyof typeof DOCS];
-      const mutated = prelude + "\n" + original;
-      const problems = run({ [document]: mutated });
-      assert.deepEqual(problems, [], `${leaker} leaked state in ${document}.md`);
+      assert.deepEqual(run({ [document]: prelude + "\n" + original }), [], `${leaker} leaked state`);
     });
   }
 }
 
 test("a leaked-fence prelude really does contain its inner delimiter, so the fixtures are honest", () => {
-  // Guards the LEAKERS fixtures themselves: if they stopped being well-formed enclosing blocks
-  // the loop above would pass for the wrong reason. The prelude must hide its own body and
-  // leave no fence open.
-  for (const prelude of Object.values(LEAKERS)) {
+  for (const [name, prelude] of Object.entries(LEAKERS)) {
     const ctx = markdownBlockContext(prelude + "visible\n");
-    assert.equal(ctx.unterminatedFence, false, prelude);
-    assert.equal(ctx.unterminatedComment, false, prelude);
-    assert.deepEqual(
-      ctx.lines.filter((l: { kind: string }) => l.kind === "content").map((l: { text: string }) => l.text),
-      ["visible"],
-      prelude,
+    assert.equal(ctx.unterminatedFence, false, name);
+    assert.equal(ctx.unterminatedComment, false, name);
+    assert.ok(
+      ctx.lines.some((l: { kind: string; text: string }) => l.kind === "content" && l.text === "visible"),
+      name,
     );
   }
 });
 
-test("indentation can never delete a requirement from spec.md", () => {
-  // The asymmetry that `HIDERS.appliesTo` encodes, asserted rather than implied. An indented
-  // heading still declares a requirement, which must then be proven in the other two documents;
-  // the previous parser dropped headings indented four spaces, which removed them from the
-  // gate's subject while it still printed a confident count.
-  assert.deepEqual(requirementIds("        #### FR-11 deeply indented\n"), ["FR-11"]);
-  const spec = SPEC.replace(CARRIER.spec, "    " + CARRIER.spec);
-  assert.deepEqual(run({ spec }), []);
-});
-
 test("an unterminated fence or comment is reported, never silently swallowed", () => {
-  // The anti-vacuous guards only ever caught TOTAL loss of a document's subject, so a construct
-  // that deleted SOME lines left the gate printing a confident count over a truncated document.
   assert.ok(run({ spec: SPEC + "\n```\n" }).includes(
     "spec.md has an unterminated fenced code block — every line after it is hidden from this gate",
   ));
@@ -419,128 +512,98 @@ test("an unterminated fence or comment is reported, never silently swallowed", (
 });
 
 test("a commented-out requirement heading does not invent a requirement", () => {
-  // The other direction of the same defect: `requirementIds` had no comment handling at all, so
-  // commenting out work the project decided NOT to build broke the build.
   assert.deepEqual(requirementIds("### FR-1 real\n\n<!--\n### FR-99 not building this\n-->\n"), ["FR-1"]);
   assert.deepEqual(run({ spec: SPEC + "\n<!--\n### FR-99 shelved\n-->\n" }), []);
 });
 
-test("a visually identical unicode hyphen or space cannot delete a line from the gate", () => {
-  // `/^\|\s*T-\d+/` and `#+\s+FR-\d+` both require an ASCII hyphen and an ASCII space, so a
-  // U+2011 hyphen or a U+00A0 after the hashes rendered identically and removed the line from
-  // every grader — in `spec.md` that silently dropped a security requirement while the gate
-  // still printed a full count.
-  assert.deepEqual(requirementIds("###\u00a0FR-8 CSP\n"), ["FR-8"]);
-  assert.deepEqual(requirementIds("### FR\u20118 CSP\n"), ["FR-8"]);
-  const tasks = TASKS.replace("| T-2 Second |", "| T\u20112 Second |");
-  assert.equal(taskTableRows(tasks).length, 2, "the U+2011 row must still be parsed and graded");
-  assert.deepEqual(run({ tasks }), []);
+test("a requirement heading is found at any depth and any indentation", () => {
+  assert.deepEqual(requirementIds("# FR-10 top\n#### FR-11 deep\n        ## FR-12 indented\n"), [
+    "FR-10",
+    "FR-11",
+    "FR-12",
+  ]);
 });
 
-// --- traceability.md is now graded as strictly as tasks.md ------------------------------------
-
-test("the traceability table ends, so a rejected-drafts appendix is outside it", () => {
-  // `new Map(...)` was last-write-wins over a raw line filter with no table termination, so an
-  // appendix row reading "draft, superseded, do not use" overrode FR-2's real implementation
-  // and test. FR-99 in the appendix is the tell: if the parser still read past the first table
-  // it would report a requirement the spec does not declare.
-  const trace =
-    TRACE +
-    "\nAppendix: rejected draft rows, do not use.\n\n" +
-    "| Requirement | Implementation | Tests | Evidence | Status |\n|---|---|---|---|---|\n" +
-    "| FR-2 | `package.json` | none | draft, superseded, do not use | Draft |\n" +
-    "| FR-99 | `package.json` | none | never built | Draft |\n";
-  assert.deepEqual(run({ trace }), []);
-  assert.deepEqual(traceabilityRows(trace).map((c: string[]) => c[1]), ["FR-1", "FR-2"]);
+test("indentation can never delete a requirement from spec.md", () => {
+  assert.deepEqual(run({ spec: SPEC.replace(CARRIER.spec, "    " + CARRIER.spec) }), []);
 });
 
 test("a duplicate traceability row is an error, not a silent overwrite", () => {
-  const trace = TRACE + "| FR-2 | `package.json` | none | draft, superseded, do not use | Draft |\n";
-  assert.deepEqual(run({ trace }), ["FR-2 has more than one row in traceability.md — remove the duplicate"]);
-});
-
-test("a traceability row with the wrong column count is reported, not read at the wrong offset", () => {
-  // With no length check, `const [, , impl, tests, evidence] = cells` left `tests` and
-  // `evidence` undefined and `"manual" + undefined` satisfied the evidence check, so a row with
-  // no test column at all passed.
-  const trace = TRACE.replace(CARRIER.trace, "| FR-2 | `lib/b.ts` | manual |");
-  const problems = run({ trace });
-  assert.ok(problems.includes("a traceability.md row has 3 columns, expected 5: FR-2"), problems.join("; "));
-  assert.ok(problems.includes("FR-2 is in spec.md but missing from traceability.md"), problems.join("; "));
-});
-
-test("evidence text saying no testing happened does not satisfy the evidence check", () => {
-  // `/manual/i.test(tests + evidence)` grepped for a word anywhere in two concatenated cells.
-  const trace = TRACE.replace(
-    CARRIER.trace,
-    "| FR-2 | `lib/b.ts` | none | no manual testing was ever performed and nothing is verified | Verified |",
-  );
-  assert.deepEqual(run({ trace }), ["FR-2 has neither a test nor manual evidence"]);
-});
-
-test("a genuine manual-evidence claim is still accepted", () => {
-  // The fix must not be a blanket ban on the word: `manual` in Tests plus a `manual:` note in
-  // Evidence is how this project records exercised-by-hand work, and the real documents use it.
-  const trace = TRACE.replace(
-    CARRIER.trace,
-    "| FR-2 | `lib/b.ts` | manual | manual: PR 2, exercised in Chrome. | Verified |",
-  );
-  assert.deepEqual(run({ trace }), []);
-});
-
-test("a traceability table that misdescribes its own columns is reported", () => {
-  // `IMPL_INDEX`/`TESTS_INDEX` were asserted against nothing, so the document could reorder its
-  // header and have the checker read Evidence as Tests.
-  const trace = TRACE.replace(
-    "| Requirement | Implementation | Tests | Evidence | Status |",
-    "| Requirement | Status | Evidence | Tests | Implementation |",
-  );
+  const trace = TRACE + "| FR-2 | `package.json` | none | draft, superseded | Draft |\n";
   assert.ok(
-    run({ trace }).some((p) => p.startsWith("traceability.md table header is")),
+    run({ trace }).includes("FR-2 has more than one row in traceability.md — remove the duplicate"),
     run({ trace }).join("; "),
   );
 });
 
-test("a tasks table that misdescribes its own columns is reported", () => {
+test("a table that misdescribes its own columns is reported", () => {
+  const trace = TRACE.replace(
+    "| Requirement | Implementation | Tests | Evidence | Status |",
+    "| Requirement | Status | Evidence | Tests | Implementation |",
+  );
+  assert.ok(run({ trace }).some((p) => p.startsWith("traceability.md table header is")));
   const tasks = TASKS.replace(
     "| Task | Pull request | Branch | Requirements | Status |",
     "| Status | Requirements | Branch | Pull request | Task |",
   );
-  assert.ok(run({ tasks }).some((p) => p.startsWith("tasks.md table header is")), run({ tasks }).join("; "));
+  assert.ok(run({ tasks }).some((p) => p.startsWith("tasks.md table header is")));
 });
 
-test("a traceability.md that parses to zero rows names itself instead of reporting a clean sheet", () => {
-  const problems = run({ trace: "# Traceability\n\nThe table is being rewritten.\n" });
-  assert.ok(problems.includes("traceability.md parsed to zero requirement rows — the coverage check cannot run"));
+test("a row with the wrong column count is reported rather than read at the wrong offset", () => {
+  const tasks = TASKS.replace(
+    row("T-2 Second", 2, "FR-2"),
+    "| T-2 Second | [#2](https://github.com/edgeorgie/triage-desk/pull/2) | extra | `branch` | FR-2 | Merged |",
+  );
+  const problems = run({ tasks });
+  assert.ok(problems.some((p) => p.startsWith("a tasks.md work item has 6 columns, expected 5")), problems.join("; "));
+  assert.ok(problems.includes("FR-2 is in requirements.json but no tasks.md work item claims it"));
 });
 
-// --- claims and delivery ----------------------------------------------------------------------
+test("a pull request link to another repository, or disagreeing with its label, is reported", () => {
+  assert.ok(
+    run({ tasks: TASKS.replace("edgeorgie/triage-desk/pull/2", "torvalds/linux/pull/2") }).some((p) =>
+      p.includes("is not an edgeorgie/triage-desk pull request"),
+    ),
+  );
+  assert.ok(
+    run({
+      tasks: TASKS.replace(
+        "[#2](https://github.com/edgeorgie/triage-desk/pull/2)",
+        "[#2](https://github.com/edgeorgie/triage-desk/pull/1)",
+      ),
+    }).includes("T-2 Second links to pull request #1 but is labelled #2"),
+  );
+});
+
+test("every link in the Pull request cell is graded, not only the first", () => {
+  const tasks = TASKS.replace(
+    "[#2](https://github.com/edgeorgie/triage-desk/pull/2)",
+    "[#2](https://github.com/edgeorgie/triage-desk/pull/2) and [#3](https://github.com/other/repo/pull/3)",
+  );
+  assert.ok(run({ tasks }).some((p) => p.includes("https://github.com/other/repo/pull/3")));
+});
 
 test("negated prose in the Requirements cell is not a claim", () => {
-  // `matchAll(/FR-\d+/g)` over free text had no polarity, so writing down that the work was NOT
-  // done counted as doing it. The cell is a closed grammar now.
   const tasks = TASKS.replace(
     row("T-2 Second", 2, "FR-2"),
     row("T-2 Second", 2, "explicitly NOT FR-2 — deferred, nothing shipped"),
   );
   const problems = run({ tasks });
-  assert.ok(
-    problems.some((p) => p.startsWith("T-2 Second has an unreadable Requirements cell")),
-    problems.join("; "),
-  );
-  assert.ok(problems.includes("FR-2 is in spec.md but no tasks.md work item claims it"), problems.join("; "));
+  assert.ok(problems.some((p) => p.startsWith("T-2 Second has an unreadable Requirements cell")), problems.join("; "));
+  assert.ok(problems.includes("FR-2 is in requirements.json but no tasks.md work item claims it"));
 });
 
-test("a comma-separated list of ids and the quality hatch are both still readable", () => {
-  // The grammar must not be so tight that the real documents stop parsing: `tasks.md` uses both
-  // `FR-1, FR-3, FR-4` and `none (quality)`.
-  const tasks = TASKS.replace(row("T-2 Second", 2, "FR-2"), row("T-2 Second", 2, "FR-2,  FR-2"));
-  assert.deepEqual(run({ tasks }), []);
+test("`none (quality)` exempts a row, never a requirement", () => {
+  const withQualityRow = TASKS.replace(
+    "Prose below",
+    `${row("T-3 CI hardening", 3, "none (quality)")}\n\nProse below`,
+  );
+  assert.deepEqual(run({ tasks: withQualityRow }), []);
+  const dodged = TASKS.replace(row("T-2 Second", 2, "FR-2"), row("T-2 Second", 2, "none (quality)"));
+  assert.ok(run({ tasks: dodged }).includes("FR-2 is in requirements.json but no tasks.md work item claims it"));
 });
 
 test("a requirement claimed only by unmerged work is not covered", () => {
-  // The Status enum graded the value and nothing consumed it, so marking every row `Abandoned`
-  // left every requirement "traced" by work the table itself says never landed.
   for (const status of ["Abandoned", "In progress", "In review"]) {
     const tasks = TASKS.replace("| FR-2 | Merged |", `| FR-2 | ${status} |`);
     assert.deepEqual(run({ tasks }), [
@@ -550,8 +613,6 @@ test("a requirement claimed only by unmerged work is not covered", () => {
 });
 
 test("a second merged row covers a requirement whose other claimant was abandoned", () => {
-  // Coverage is about delivery, not about every row being tidy: an abandoned attempt alongside
-  // a merged one must not fail the gate.
   const tasks = TASKS.replace(
     row("T-2 Second", 2, "FR-2"),
     `${row("T-2 Second", 2, "FR-2").replace("| Merged |", "| Abandoned |")}\n${row("T-3 Retry", 3, "FR-2")}`,
@@ -559,54 +620,40 @@ test("a second merged row covers a requirement whose other claimant was abandone
   assert.deepEqual(run({ tasks }), []);
 });
 
-// --- blocks that are not content cannot be table rows -----------------------------------------
-
-test("a four-space-indented row is a code block, not a contract row", () => {
-  const tasks = TASKS.replace(row("T-2 Second", 2, "FR-2"), "    " + row("T-2 Second", 2, "FR-2"));
-  assert.deepEqual(taskTableRows(tasks).map((c: string[]) => c[1]), ["T-1 First"]);
-  assert.deepEqual(run({ tasks }), ["FR-2 is in spec.md but no tasks.md work item claims it"]);
+test("a pipe inside inline code or escaped does not make a legitimate row malformed", () => {
+  const tasks = TASKS.replace("| T-2 Second |", "| T-2 Second `a|b` and c\\|d |");
+  assert.deepEqual(run({ tasks }), []);
 });
 
-test("a fenced block ends the contract table, so a row below it is outside it", () => {
-  // "Only the first table counts, and a blank line ends it" was true for blank lines and prose
-  // only: a fence is neither, and the fence branch continued without ending the table.
-  const tasks = `# Tasks\n
-| Task | Pull request | Branch | Requirements | Status |
-|---|---|---|---|---|
-${row("T-1 First", 1, "FR-1")}
-\`\`\`
-\`\`\`
-${row("T-9 Smuggled", 9, "FR-2")}
-`;
-  assert.deepEqual(taskTableRows(tasks).map((c: string[]) => c[1]), ["T-1 First"]);
-  assert.deepEqual(run({ tasks }), ["FR-2 is in spec.md but no tasks.md work item claims it"]);
+test("a document whose table parses to zero rows names itself instead of reporting a clean sheet", () => {
+  assert.ok(
+    run({ trace: "# Traceability\n\nThe table is being rewritten.\n" }).includes(
+      "traceability.md parsed to zero requirement rows — the coverage check cannot run",
+    ),
+  );
+  assert.ok(
+    run({ tasks: "# Tasks\n\nThe table is being rewritten.\n" }).includes(
+      "tasks.md parsed to zero work-item rows — the coverage check cannot run",
+    ),
+  );
 });
 
 test("a four-space-indented fence delimiter is an indented code block, not a fence", () => {
-  // CommonMark allows a fence to be indented up to three columns; at four it is literal text.
-  // Treating an indented delimiter as a fence let it swallow the rest of the document.
   const ctx = markdownBlockContext("    ```\nvisible\n");
   assert.equal(ctx.unterminatedFence, false);
-  assert.deepEqual(
-    ctx.lines.filter((l: { kind: string }) => l.kind === "content").map((l: { text: string }) => l.text),
-    ["visible"],
-  );
-  assert.deepEqual(requirementIds("   ```\n### FR-1 hidden by a 3-space fence\n   ```\n### FR-2 real\n"), ["FR-2"]);
+  assert.ok(ctx.lines.some((l: { kind: string; text: string }) => l.kind === "content" && l.text === "visible"));
 });
 
-// --- the shared block reader, directly ---------------------------------------------------------
-
 test("fence state is keyed on the delimiter character and its run length", () => {
-  const longer = markdownBlockContext("````\n```\ninside\n````\nafter\n");
-  assert.deepEqual(
-    longer.lines.filter((l: { kind: string }) => l.kind === "content").map((l: { text: string }) => l.text),
-    ["after"],
-  );
-  const crossed = markdownBlockContext("~~~\n```\ninside\n~~~\nafter\n");
-  assert.deepEqual(
-    crossed.lines.filter((l: { kind: string }) => l.kind === "content").map((l: { text: string }) => l.text),
-    ["after"],
-  );
+  for (const doc of ["````\n```\ninside\n````\nafter\n", "~~~\n```\ninside\n~~~\nafter\n"]) {
+    assert.deepEqual(
+      markdownBlockContext(doc)
+        .lines.filter((l: { kind: string }) => l.kind === "content")
+        .map((l: { text: string }) => l.text),
+      ["after"],
+      doc,
+    );
+  }
 });
 
 test("an inline comment is stripped from a line rather than deleting the line", () => {
@@ -617,159 +664,250 @@ test("an inline comment is stripped from a line rather than deleting the line", 
   );
 });
 
-test("a comment spanning lines hides only the lines it covers", () => {
-  const ctx = markdownBlockContext("before\n<!--\nhidden\n-->\nafter\n");
-  assert.deepEqual(
-    ctx.lines.filter((l: { kind: string }) => l.kind === "content").map((l: { text: string }) => l.text),
-    ["before", "after"],
-  );
-});
-
 test("a fence delimiter inside an HTML comment does not open a block", () => {
-  // Comments are resolved before fences, or a commented-out delimiter leaks fence state out of
-  // the comment that was supposed to contain it.
   const ctx = markdownBlockContext("<!-- ``` -->\nafter\n");
   assert.equal(ctx.unterminatedFence, false);
-  assert.deepEqual(
-    ctx.lines.filter((l: { kind: string }) => l.kind === "content").map((l: { text: string }) => l.text),
-    ["after"],
-  );
+  assert.ok(ctx.lines.some((l: { kind: string; text: string }) => l.kind === "content" && l.text === "after"));
 });
 
-test("all three documents are read through the one shared block reader", () => {
-  // The structural assertion, not a behavioural one: the recurring root cause was three parsers
-  // of unequal strength in one file, so each round's fix reached one document. If a fourth
-  // near-copy of fence/comment handling appears, this fails and says why.
-  const source = readFileSync("scripts/check-spec.mjs", "utf8");
-  const calls = source.match(/markdownBlockContext\(/g) ?? [];
-  // One definition plus the call sites: the three block-structure checks and the two parsers.
-  assert.ok(calls.length >= 6, `expected the shared reader to be used throughout, saw ${calls.length} mentions`);
-  assert.equal(
-    (source.match(/indexOf\("<!--"\)/g) ?? []).length,
-    1,
-    "HTML comment handling must exist in exactly one place",
+test("the row readers expose first-table membership, so coverage and shape stay separable", () => {
+  const rows = taskTableRows(TASKS + "\n" + row("T-9 Appendix", 9, "FR-2") + "\n");
+  assert.deepEqual(
+    rows.map((r: { cells: string[]; inFirstTable: boolean }) => [r.cells[1], r.inFirstTable]),
+    [
+      ["T-1 First", true],
+      ["T-2 Second", true],
+      ["T-9 Appendix", false],
+    ],
   );
-  assert.equal(
-    (source.match(/function fenceDelimiter/g) ?? []).length,
-    1,
-    "fence handling must exist in exactly one place",
+  assert.deepEqual(
+    traceabilityRows(TRACE).map((r: { cells: string[]; inFirstTable: boolean }) => [r.cells[1], r.inFirstTable]),
+    [
+      ["FR-1", true],
+      ["FR-2", true],
+    ],
   );
 });
 
 // --- the real documents, adversarially --------------------------------------------------------
-//
-// `"this repository's own specification documents pass"` above asserts only that the CORRECT
-// documents produce no problems, so it is a regression guard against false positives and
-// contributes nothing against false negatives. A previous round claimed on-disk validation it
-// had not performed — the constructs it named were not in the file, and the parser stopped
-// before where they would have been. These cases mutate the documents actually on disk, so the
-// suite's contact with reality is not limited to a known-good input being accepted.
 
 const ON_DISK = () => ({
+  requirements: readFileSync("docs/spec/requirements.json", "utf8"),
   spec: readFileSync("docs/spec/spec.md", "utf8"),
   trace: readFileSync("docs/spec/traceability.md", "utf8"),
   tasks: readFileSync("docs/spec/tasks.md", "utf8"),
 });
 
-test("the real traceability.md, wholly commented out, is not certified as traced", () => {
-  // The exploit that printed "9 requirements traced" with no traceability present at all.
+test("the real FR-8 (the CSP security requirement) cannot be removed by a fullwidth comment", () => {
+  // The critic's headline reproduction, verbatim: FR-8 removed from all three documents with
+  // characters that render as their original text, plus an unbuilt FR-22 planted. Before this
+  // change the gate printed "spec check passed: 8 requirements traced" and exited 0.
+  const docs = ON_DISK();
+  const H = "### FR-8 Content Security Policy on the static export";
+  const problems = checkSpec({
+    ...docs,
+    spec: docs.spec.replace(H, `${FULLWIDTH_OPEN}${H}${FULLWIDTH_CLOSE}`) +
+      `\n${FULLWIDTH_FENCE}\n### FR-22 Unbuilt\n${FULLWIDTH_FENCE}\n`,
+    trace: docs.trace.replace("| FR-8 |", `| ${FULLWIDTH_OPEN}FR-8${FULLWIDTH_CLOSE} |`),
+    tasks: docs.tasks.replace("| T-6 Content Security Policy", `| ${FULLWIDTH_OPEN}T-6${FULLWIDTH_CLOSE} Content Security Policy`),
+    exists: allExist,
+  });
+  assert.ok(problems.includes("FR-8 is declared in requirements.json but has no heading in spec.md"), problems.join("; "));
+  assert.ok(problems.includes("spec.md declares FR-22, which requirements.json does not"), problems.join("; "));
+  assert.ok(problems.includes("FR-8 is in requirements.json but missing from traceability.md"), problems.join("; "));
+  assert.ok(problems.includes("FR-8 is in requirements.json but no tasks.md work item claims it"), problems.join("; "));
+});
+
+test("the real traceability.md, wholly commented out or wholly fenced, is not certified as traced", () => {
   const docs = ON_DISK();
   const lines = docs.trace.split("\n");
   const start = lines.findIndex((l) => l.startsWith("| Requirement |"));
   const end = lines.findLastIndex((l) => l.startsWith("| FR-"));
   assert.ok(start >= 0 && end > start, "fixture could not locate the real table");
-  const trace = [
-    ...lines.slice(0, start),
-    "<!--",
-    ...lines.slice(start, end + 1),
-    "-->",
-    ...lines.slice(end + 1),
-  ].join("\n");
-  const problems = checkSpec({ ...docs, trace, exists: allExist });
-  assert.ok(
-    problems.includes("traceability.md parsed to zero requirement rows — the coverage check cannot run"),
-    problems.join("; "),
-  );
-  assert.ok(problems.includes("FR-1 is in spec.md but missing from traceability.md"), problems.join("; "));
-});
-
-test("the real traceability.md, wholly fenced, is not certified as traced", () => {
-  const docs = ON_DISK();
-  const lines = docs.trace.split("\n");
-  const start = lines.findIndex((l) => l.startsWith("| Requirement |"));
-  const end = lines.findLastIndex((l) => l.startsWith("| FR-"));
-  const trace = [
-    ...lines.slice(0, start),
-    "```",
-    ...lines.slice(start, end + 1),
-    "```",
-    ...lines.slice(end + 1),
-  ].join("\n");
-  const problems = checkSpec({ ...docs, trace, exists: allExist });
-  assert.ok(
-    problems.includes("traceability.md parsed to zero requirement rows — the coverage check cannot run"),
-    problems.join("; "),
-  );
-});
-
-test("a new requirement in the real spec.md after a leaked fence is not certified", () => {
-  // A four-backtick fence containing a three-backtick line leaked state and deleted every
-  // requirement declared after it, so a brand-new FR with no implementation, no test, no
-  // traceability row and no task row passed — and the printed count was unchanged.
-  const docs = ON_DISK();
-  const spec =
-    docs.spec +
-    "\n````\nHow to show a fenced block inside documentation:\n```\n````\n\n### FR-22 Smuggled\n\nStatus: Verified.\n";
-  const problems = checkSpec({ ...docs, spec, exists: allExist });
-  assert.ok(problems.includes("FR-22 is in spec.md but missing from traceability.md"), problems.join("; "));
-  assert.ok(problems.includes("FR-22 is in spec.md but no tasks.md work item claims it"), problems.join("; "));
-});
-
-test("a do-not-use appendix cannot override the real traceability.md, and a duplicate is an error", () => {
-  const docs = ON_DISK();
-  const appendixRow = "| FR-7 | `package.json` | none | draft, superseded, do not use | Draft |";
-  // Outside the first table: ignored, and FR-7 keeps its real evidence.
-  const appendix =
-    docs.trace +
-    "\n## Appendix: rejected draft rows, do not use\n\n" +
-    "| Requirement | Implementation | Tests | Evidence | Status |\n|---|---|---|---|---|\n" +
-    appendixRow +
-    "\n";
-  assert.deepEqual(checkSpec({ ...docs, trace: appendix, exists: allExist }), []);
-  // Inside it: an error rather than a last-write-wins overwrite.
-  const traceLines = docs.trace.split("\n");
-  const last = traceLines.findLastIndex((l) => l.startsWith("| FR-"));
-  traceLines.splice(last + 1, 0, appendixRow);
-  assert.deepEqual(checkSpec({ ...docs, trace: traceLines.join("\n"), exists: allExist }), [
-    "FR-7 has more than one row in traceability.md — remove the duplicate",
-  ]);
+  for (const [open, close] of [["<!--", "-->"], ["```", "```"]] as const) {
+    const trace = [...lines.slice(0, start), open, ...lines.slice(start, end + 1), close, ...lines.slice(end + 1)].join("\n");
+    const problems = checkSpec({ ...docs, trace, exists: allExist });
+    assert.ok(
+      problems.includes("traceability.md parsed to zero requirement rows — the coverage check cannot run"),
+      problems.join("; "),
+    );
+    assert.ok(problems.includes("FR-1 is in requirements.json but missing from traceability.md"), problems.join("; "));
+  }
 });
 
 test("every work item in the real tasks.md marked Abandoned is not certified as traced", () => {
   const docs = ON_DISK();
   const tasks = docs.tasks.replace(/\| Merged \|/g, "| Abandoned |");
   assert.notEqual(tasks, docs.tasks, "fixture did not mutate");
-  const problems = checkSpec({ ...docs, tasks, exists: allExist });
   assert.ok(
-    problems.some((p) => p.startsWith("FR-1 is claimed only by work items that are not merged")),
-    problems.join("; "),
+    checkSpec({ ...docs, tasks, exists: allExist }).some((p) =>
+      p.startsWith("FR-1 is claimed only by work items that are not merged"),
+    ),
   );
 });
 
 test("the real documents' prose cannot be read as contract rows", () => {
-  // The honesty check the previous round claimed and did not perform: plant an unmissable row
-  // and a commented-out requirement deep in each document's prose, below where its table ends,
-  // and assert the parse is unchanged. If a future edit moves a table or removes a terminator,
-  // this fails instead of passing silently.
   const docs = ON_DISK();
-  const baseline = checkSpec({ ...docs, exists: allExist });
-  assert.deepEqual(baseline, [], "the real documents must pass before this test means anything");
-  const planted = {
-    spec: docs.spec + "\n<!--\n### FR-98 planted in prose\n-->\n\n```\n### FR-97 planted in a fence\n```\n",
-    trace: docs.trace + "\n| FR-96 | `package.json` | none | planted in prose | Draft |\n",
-    tasks:
-      docs.tasks +
-      "\n| T-98 Planted in prose | [#1](https://github.com/edgeorgie/triage-desk/pull/1) | `x` | FR-95 | Merged |\n",
-  };
-  assert.deepEqual(checkSpec({ ...planted, exists: allExist }), []);
+  assert.deepEqual(checkSpec({ ...docs, exists: allExist }), [], "the real documents must pass first");
+  assert.deepEqual(
+    checkSpec({
+      ...docs,
+      spec: docs.spec + "\n<!--\n### FR-98 planted in prose\n-->\n\n```\n### FR-97 planted in a fence\n```\n",
+      exists: allExist,
+    }),
+    [],
+  );
+});
+
+// --- the structural anti-duplication guard, by SHAPE ------------------------------------------
+//
+// The guard this replaces asserted `source.match(/function fenceDelimiter/g).length === 1` and
+// `source.match(/indexOf\("<!--"\)/g).length === 1` — a check on a SPELLING, not on duplicated
+// logic. A cold review appended a second, fully working fence-and-comment parser with RENAMED
+// helpers and `"<" + "!--"` instead of `"<!--"`, and the guard passed, 83/83 green. It only ever
+// caught a verbatim copy-paste that kept both identifier spellings, which is not how a
+// contributor adding a fourth document's parser would write it.
+//
+// Detection is therefore by SHAPE: the module's top-level functions are extracted and each body
+// is scanned for block-structure PRIMITIVES — a backtick/tilde run match, an HTML comment
+// delimiter however it is spelled or concatenated, a raw document split. The set of functions
+// carrying any such primitive must equal a small closed allowlist, which gets its own assertion
+// so it cannot quietly grow.
+
+/** Functions permitted to contain block-structure primitives. Deliberately tiny. */
+const BLOCK_STRUCTURE_OWNERS = ["fenceDelimiter", "markdownBlockContext"];
+
+/** Strip line and block comments, so prose about `<!--` is not mistaken for code. */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^[ \t]*\/\/.*$/gm, " ");
+}
+
+/**
+ * Fold adjacent string-literal concatenations, so `"<" + "!--"` reads as `"<!--"`.
+ *
+ * This is the exact evasion that defeated the previous guard, so it is normalised away rather
+ * than enumerated.
+ */
+function foldConcatenatedStrings(source: string): string {
+  let out = source;
+  for (let i = 0; i < 8; i += 1) {
+    const next = out.replace(/(["'])([^"'\n]*)\1\s*\+\s*(["'])([^"'\n]*)\3/g, (_m, q, a, _q2, b) => `${q}${a}${b}${q}`);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/** Top-level `function name(...) { ... }` declarations, as `{ name, body }`, by brace matching. */
+function topLevelFunctions(source: string): Array<{ name: string; body: string }> {
+  const out: Array<{ name: string; body: string }> = [];
+  const decl = /(?:^|\n)\s*(?:export\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = decl.exec(source)) !== null) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    for (; i < source.length && depth > 0; i += 1) {
+      if (source[i] === "{") depth += 1;
+      else if (source[i] === "}") depth -= 1;
+    }
+    out.push({ name: m[1], body: source.slice(m.index + m[0].length, i - 1) });
+  }
+  return out;
+}
+
+/** Block-structure primitives, by shape rather than by any known identifier name. */
+function blockStructurePrimitives(body: string): string[] {
+  const found: string[] = [];
+  // A run-of-three-or-more fence delimiter matcher, however the regex is written.
+  if (/(?:`|~|\\u0060|\\u007e)\s*\{\s*3\s*,/.test(body) || /```|~~~/.test(body)) found.push("a fence delimiter run");
+  // An HTML comment delimiter, after string concatenation is folded.
+  if (/<!--|-->/.test(body)) found.push("an HTML comment delimiter");
+  // Splitting a document into raw lines is the entry point of a hand-rolled block parser.
+  if (/\.split\(\s*(["'])\\n\1\s*\)/.test(body)) found.push("a raw document line split");
+  return found;
+}
+
+test("block structure is classified in exactly one place, detected by shape and not by name", () => {
+  const source = foldConcatenatedStrings(stripComments(readFileSync("scripts/check-spec.mjs", "utf8")));
+  const functions = topLevelFunctions(source);
+  assert.ok(functions.length >= 10, `the function scanner found only ${functions.length} functions — it is broken`);
+
+  const carriers = functions
+    .filter((f) => blockStructurePrimitives(f.body).length > 0)
+    .map((f) => f.name)
+    .sort();
+  assert.deepEqual(
+    carriers,
+    [...BLOCK_STRUCTURE_OWNERS].sort(),
+    `block-structure handling must exist only in ${BLOCK_STRUCTURE_OWNERS.join(" and ")}, but these functions contain it: ${carriers.join(", ")}`,
+  );
+});
+
+test("the shape scanner really detects a RENAMED duplicate parser, so the guard above is not vacuous", () => {
+  // Mutation-validation of the guard itself, against the exact case that defeated its
+  // predecessor: a second working parser whose helpers are renamed and whose comment delimiter
+  // is assembled by concatenation. A guard never observed failing may be passing vacuously.
+  const renamedDuplicate = `
+function blockDelimiter(line) {
+  const m = line.trim().match(/^(\\\`{3,}|~{3,})/);
+  return m ? m[1] : null;
+}
+export function constitutionIds(doc) {
+  const ids = [];
+  let fence = null;
+  let inComment = false;
+  for (const raw of doc.split("\\n")) {
+    const delim = blockDelimiter(raw);
+    if (fence) { if (delim && delim[0] === fence[0]) fence = null; continue; }
+    if (delim) { fence = delim; continue; }
+    let line = raw;
+    const open = line.indexOf("<" + "!--");
+    if (open !== -1) line = line.slice(0, open);
+    const m = line.match(/^#+\\s+(FR-\\d+)\\b/);
+    if (m) ids.push(m[1]);
+  }
+  return ids;
+}
+`;
+  const real = readFileSync("scripts/check-spec.mjs", "utf8");
+  const mutated = foldConcatenatedStrings(stripComments(real + renamedDuplicate));
+  const carriers = topLevelFunctions(mutated)
+    .filter((f) => blockStructurePrimitives(f.body).length > 0)
+    .map((f) => f.name);
+  // Both halves of the duplicate are detected despite neither name appearing in the allowlist.
+  assert.ok(carriers.includes("blockDelimiter"), `renamed fence helper missed: ${carriers.join(", ")}`);
+  assert.ok(carriers.includes("constitutionIds"), `renamed comment+split parser missed: ${carriers.join(", ")}`);
+  // And a verbatim copy-paste, the only case the old guard caught, is still detected.
+  const verbatim = foldConcatenatedStrings(
+    stripComments(real + renamedDuplicate.replace(/blockDelimiter/g, "fenceDelimiter2").replace('"<" + "!--"', '"<!--"')),
+  );
+  assert.ok(
+    topLevelFunctions(verbatim)
+      .filter((f) => blockStructurePrimitives(f.body).length > 0)
+      .map((f) => f.name)
+      .includes("fenceDelimiter2"),
+  );
+});
+
+test("the block-structure allowlist stays disjoint from the rest of the module's functions", () => {
+  // A shape-based check needs a closed allowlist of deliberate owners; without its own guard the
+  // allowlist is where the next near-copy would be quietly added.
+  const source = stripComments(readFileSync("scripts/check-spec.mjs", "utf8"));
+  const names = topLevelFunctions(source).map((f) => f.name);
+  for (const owner of BLOCK_STRUCTURE_OWNERS) {
+    assert.ok(names.includes(owner), `${owner} is on the allowlist but is not a function in the module`);
+  }
+  assert.equal(new Set(BLOCK_STRUCTURE_OWNERS).size, BLOCK_STRUCTURE_OWNERS.length);
+  assert.ok(BLOCK_STRUCTURE_OWNERS.length <= 2, "the allowlist must not grow silently");
+});
+
+test("no parser reads the raw document except the one shared block reader", () => {
+  // The inverted form of the same property, and the cheapest one to keep true: every document
+  // reader must go through `markdownBlockContext`, so there is one implementation of "what counts
+  // as document content" to close a bypass in.
+  const source = foldConcatenatedStrings(stripComments(readFileSync("scripts/check-spec.mjs", "utf8")));
+  const splitters = topLevelFunctions(source)
+    .filter((f) => /\.split\(\s*(["'])\\n\1\s*\)/.test(f.body))
+    .map((f) => f.name);
+  assert.deepEqual(splitters, ["markdownBlockContext"], `raw document splits outside the shared reader: ${splitters.join(", ")}`);
 });

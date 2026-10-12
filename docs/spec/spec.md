@@ -23,6 +23,12 @@ Maintainers who triage issues.
 
 ## Requirements
 
+**`docs/spec/requirements.json` is the source of truth for which requirements exist.** The headings
+below are reconciled against it by `npm run spec:check`, in both directions — a heading with no
+JSON entry and a JSON entry with no heading are both errors. A requirement id must be a plain
+ASCII `FR-<n>`; a confusable spelling is a hard error, not a different id. Adding a requirement
+means adding an entry there as well as a heading here.
+
 ### FR-1 Tool-use loop
 
 Status: Verified.
