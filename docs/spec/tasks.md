@@ -47,21 +47,59 @@ GitHub were accepted, and only the first link in a cell was graded. Requirement 
 one or indented four spaces vanished silently, which was the exact case the fix claimed to have
 handled.
 
+The third review found that every one of those fixes had landed in the parser for *this* file
+and nowhere else. `scripts/check-spec.mjs` held three parsers of wildly unequal strength — one
+per document — and each round had hardened whichever one that round's reviewer attacked. So the
+same bypasses were still live one document over: wrapping the whole of `traceability.md`'s table
+in `<!-- -->`, or in a code fence, left the gate printing "9 requirements traced" with no
+traceability present at all, and a leaked four-backtick fence in `spec.md` let a requirement be
+declared with no implementation, no test, no traceability row and no task row while the printed
+count stayed at 9 — because the anti-vacuous guard only ever caught *total* loss of a document's
+subject, never partial.
+
+That is the lesson this section exists to record: a bypass is not closed by fixing the parser
+you are looking at. All three documents are now read through one shared block-context reader, so
+there is a single implementation of "what counts as document content" and a construct closed
+anywhere is closed everywhere. The adversarial tests are parameterised over all three documents
+for the same reason.
+
 `scripts/check-spec.mjs` now asserts that
 
 - every `FR-n` declared in `spec.md` is claimed by at least one row in this table,
 - no row cites an `FR-n` that does not exist in `spec.md`,
-- rows come only from the first table, which a blank line ends, with comments stripped inline and
-  fenced blocks tracked by their opening delimiter,
+- at least one row claiming an `FR-n` has Status `Merged`, so a requirement cannot be "covered"
+  by work the table itself records as abandoned or unfinished,
+- a row's Requirements cell is a comma-separated list of bare `FR-n` ids or exactly
+  `none (quality)`, so prose such as "explicitly NOT FR-9" is a malformed cell rather than a
+  claim to have delivered FR-9,
+- rows come only from the first table in the document, which ends at the first line that is not
+  one of its rows — a blank line, prose, a code fence, or a four-space-indented code block,
+- the table's header row matches the columns the checker reads by position, so the document
+  cannot misdescribe its own columns,
 - every row has exactly five columns — counting pipes inside inline code and escaped pipes as
   text, not separators — so the Requirements cell cannot be read from the wrong position,
 - every link in a row's Pull request cell points at a pull request *in this repository* and
   agrees with its own label, and
 - every row's Status is one of `Merged`, `In review`, `In progress` or `Abandoned`.
 
-Requirement ids are read from a heading at any depth and any indentation, and a heading inside a
-fenced block does not declare one. A `spec.md` yielding zero requirements reports a parser
-failure rather than a clean sheet.
+The same reader grades `traceability.md`, which previously had none of this: its rows also come
+only from its first table, are checked for exactly five columns and for a header matching the
+columns read, a second row for the same requirement is an error rather than silently replacing
+the first, and manual evidence must be claimed as `manual` in the Tests column together with a
+`manual:` note in Evidence — a substring search for the word "manual" was satisfied by evidence
+text reading "no manual testing was ever performed".
+
+Requirement ids are read from a heading at any depth and any indentation. A heading inside a
+code fence or inside an HTML comment does not declare a requirement, so an example in the prose
+cannot invent one and commenting out work the project decided not to build does not break the
+build. A heading indented four or more spaces *does* still declare one: of the two ways to be
+wrong, inventing a requirement that must then be proven is the safe direction, while dropping one
+would let unbuilt work through — indentation is therefore never a way to remove a requirement
+from this gate. Text that renders identically is parsed identically, so a non-breaking hyphen or
+space cannot delete a line from the checks. An unterminated fence or comment, which hides every
+line after it, is reported rather than silently swallowing the rest of the file, and a `spec.md`
+yielding zero requirements or a document whose table parses to zero rows reports a parser failure
+rather than a clean sheet.
 
 **What this gate does not and cannot check.** The Pull request column is graded for *shape*, not
 truth: a self-consistent citation of the wrong pull request still passes. T-6 originally
