@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.issue.pull_request == null || github.event_name == 'pull_request_target'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The bot posts via the REST API with GITHUB_TOKEN passed explicitly
           # in the "Run triage bot" step's env; it never pushes with git, so the
