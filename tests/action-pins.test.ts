@@ -495,29 +495,130 @@ test("the YAML parser this guard depends on is pinned exactly", () => {
   );
 });
 
+/**
+ * Normalise a `permissions:` value into scope -> level.
+ *
+ * GitHub accepts three shapes: the `write-all`/`read-all` shorthands, a mapping
+ * of scope to `read`/`write`/`none`, and (as `{}`) an explicit grant of nothing.
+ * `write-all` is represented by a wildcard entry because it grants write on
+ * every scope that exists, including scopes not named anywhere in this repo.
+ */
+function permissionLevels(value: unknown): Map<string, string> | null {
+  if (value === "read-all") return new Map([["*", "read"]]);
+  if (value === "write-all") return new Map([["*", "write"]]);
+  if (!isRecord(value)) return null;
+  const out = new Map<string, string>();
+  for (const [scope, level] of Object.entries(value)) {
+    if (typeof level === "string") out.set(scope, level);
+  }
+  return out;
+}
+
+/** The level a normalised permissions map actually grants for one scope. */
+function grantedLevel(levels: Map<string, string>, scope: string): string {
+  return levels.get(scope) ?? levels.get("*") ?? "none";
+}
+
+const RANK: Record<string, number> = { none: 0, read: 1, write: 2 };
+const rankOf = (level: string) => RANK[level] ?? 2;
+
 test("every workflow declares least-privilege permissions", () => {
   // Pinning a SHA bounds WHICH code runs; it does nothing to bound what that
   // code can do. `eval.yml` invokes an action from another repository and ran
   // for a while on the repository-default token permissions — i.e. write, on a
   // repo whose default is read-write — on every PR and every push to main.
+  //
+  // A workflow-level block is NOT the whole story: GitHub lets each job carry
+  // its own `permissions:`, and the job-level block REPLACES the workflow-level
+  // one rather than intersecting with it, so a job can grant itself strictly
+  // more scope than the workflow header advertises. An earlier version of this
+  // test read only `doc.permissions`, and a job-level escalation to
+  // `contents: write` + `actions: write` + `id-token: write` under a workflow
+  // header still reading `contents: read` was measured passing it green. A
+  // reviewer reading the top of the file would have seen `contents: read` and
+  // been wrong about every job beneath it. So both levels are graded, and a job
+  // may only ever NARROW what the workflow header grants.
   const workflows = repoYamlFiles().filter((f) =>
     relative(REPO_ROOT, f).startsWith(".github/workflows/"),
   );
+  assert.ok(workflows.length > 0, "no workflows discovered — discovery is broken");
+
   for (const file of workflows) {
     const where = relative(REPO_ROOT, file);
     const doc = parseYamlFile(file);
     assert.ok(isRecord(doc), `${where} did not parse as a mapping`);
-    const permissions = doc.permissions;
+
+    const top = permissionLevels(doc.permissions);
     assert.ok(
-      permissions === "read-all" || isRecord(permissions),
+      top !== null,
       `${where} declares no top-level permissions: block, so it runs on the ` +
         `repository-default GITHUB_TOKEN scope`,
     );
-    if (isRecord(permissions)) {
+    assert.ok(top.size > 0, `${where} declares an empty permissions: block`);
+    assert.notEqual(
+      grantedLevel(top, "*"),
+      "write",
+      `${where} declares permissions: write-all, which grants write on every ` +
+        `scope and is the opposite of least privilege`,
+    );
+
+    // Job-level blocks: present is fine, WIDER is not.
+    const jobs = isRecord(doc.jobs) ? doc.jobs : {};
+    for (const [jobId, job] of Object.entries(jobs)) {
+      if (!isRecord(job) || job.permissions === undefined) continue;
+      const jobLevels = permissionLevels(job.permissions);
       assert.ok(
-        Object.keys(permissions).length > 0,
-        `${where} declares an empty permissions: block`,
+        jobLevels !== null && jobLevels.size > 0,
+        `${where} job '${jobId}' declares an empty or unparseable permissions: block`,
+      );
+      for (const scope of new Set([...jobLevels.keys(), ...top.keys()])) {
+        const want = grantedLevel(jobLevels, scope);
+        const allowed = grantedLevel(top, scope);
+        assert.ok(
+          rankOf(want) <= rankOf(allowed),
+          `${where} job '${jobId}' escalates '${scope}' to '${want}' while the ` +
+            `workflow-level permissions block grants only '${allowed}'. A ` +
+            `job-level block REPLACES the workflow-level one, so this job runs ` +
+            `with more scope than the workflow header advertises. Jobs may ` +
+            `narrow permissions, never widen them.`,
+        );
+      }
+    }
+  }
+});
+
+test("the permissions comparison accepts narrowing and rejects every widening", () => {
+  // Non-vacuity: the repo declares no job-level permissions today, so the loop
+  // above runs over an empty set of jobs. This pins what WOULD be rejected the
+  // day someone adds one, so a green run above cannot be explained by a
+  // comparison that accepts everything.
+  const top = permissionLevels({ contents: "read" }) as Map<string, string>;
+
+  for (const ok of [{ contents: "read" }, { contents: "none" }, { issues: "none" }]) {
+    const job = permissionLevels(ok) as Map<string, string>;
+    for (const scope of new Set([...job.keys(), ...top.keys()])) {
+      assert.ok(
+        rankOf(grantedLevel(job, scope)) <= rankOf(grantedLevel(top, scope)),
+        `expected ${JSON.stringify(ok)} to be accepted as a narrowing`,
       );
     }
   }
+
+  for (const bad of [
+    { contents: "write" },
+    { issues: "write" },
+    { "id-token": "write" },
+  ] as Record<string, string>[]) {
+    const job = permissionLevels(bad) as Map<string, string>;
+    const widens = [...new Set([...job.keys(), ...top.keys()])].some(
+      (scope) => rankOf(grantedLevel(job, scope)) > rankOf(grantedLevel(top, scope)),
+    );
+    assert.ok(widens, `expected ${JSON.stringify(bad)} to be rejected as a widening`);
+  }
+
+  // `write-all` at job level must be caught by the wildcard, not slip through
+  // because no named scope happened to overlap.
+  const writeAll = permissionLevels("write-all") as Map<string, string>;
+  assert.equal(grantedLevel(writeAll, "contents"), "write");
+  assert.ok(rankOf(grantedLevel(writeAll, "contents")) > rankOf(grantedLevel(top, "contents")));
 });
