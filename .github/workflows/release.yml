@@ -20,6 +20,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
+          # `gh release create` below authenticates with GH_TOKEN from the step
+          # env, not with the git credential helper, so the token does not need
+          # to persist in .git/config even though this is the one workflow with
+          # `contents: write`.
+          persist-credentials: false
       - name: Check the version matches package.json
         env:
           VERSION: ${{ inputs.version }}

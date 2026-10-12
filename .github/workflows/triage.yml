@@ -46,6 +46,13 @@ jobs:
     if: github.event.issue.pull_request == null || github.event_name == 'pull_request_target'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The bot posts via the REST API with GITHUB_TOKEN passed explicitly
+          # in the "Run triage bot" step's env; it never pushes with git, so the
+          # token does not need to persist in .git/config. This matters more here
+          # than elsewhere: `pull_request_target` runs with repo write
+          # permissions against a PR opened by any account.
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22

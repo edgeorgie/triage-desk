@@ -157,7 +157,8 @@ production/operational measurements, not self-graded.
 - 1/2 (50%) — duplicate detection rate on the same self-labeled check (near-verbatim caught, paraphrase missed; n=2 is too small to generalize)
 - 0.274ms → ~0.03ms — heuristic triage latency per case, cold vs. JIT-warmed
 - 6/6 — eval-lab eval cases passing against this bot's real heuristic logic in CI ([run 37987251361](https://github.com/edgeorgie/triage-desk/actions/runs/37987251361))
-- 22/22 — local unit tests passing (`npm test`)
+- 43/43 — local unit tests passing (`npm test`), run on every pull request by the
+  required `verify` check ([ci.yml](.github/workflows/ci.yml))
 
 ## Limits
 
