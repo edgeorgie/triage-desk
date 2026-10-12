@@ -7,6 +7,25 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    # `typescript@7` is held back deliberately, not by neglect.
+    # `eslint-config-next` bundles its own copy of `typescript-eslint`, and
+    # that copy refuses TS 7 outright — re-measured against the version
+    # currently in this repo's tree, `npm run lint` exits 2 with:
+    #
+    #   Error: typescript-eslint does not support TS 7.0.
+    #     at eslint-config-next/node_modules/typescript-eslint/dist/index.js:52
+    #
+    # `tsc --noEmit` itself passes on TS 7; only the bundled linter fails, and
+    # nothing in this repo's manifest can fix that, since the incompatible copy
+    # is transitive. Upstream:
+    # https://github.com/typescript-eslint/typescript-eslint/issues/10940
+    #
+    # Scoped to `>=7`, so TS 6 and every minor/patch still flow normally.
+    # Remove once `eslint-config-next` ships a copy that supports TS 7.
+    ignore:
+      - dependency-name: typescript
+        versions: [">=7"]
+
 
   # Covers the `actions/*` refs in this repo's workflows, which are SHA-pinned
   # to a tagged release — the case GitHub documents Dependabot as handling.
@@ -25,28 +44,6 @@ updates:
   # (`required_status_checks.contexts == ["eval", "verify"]`, strict) — so an
   # unpinned ref cannot merge. That is the mechanism; this comment only
   # describes it.
-
-    # Two majors are held back deliberately, not by neglect. `eslint-config-next`
-    # bundles its own `typescript-eslint`, and that copy hard-refuses both of
-    # them — observed in CI, not assumed:
-    #
-    #   typescript@7.x  -> "typescript-eslint does not support TS 7.0"
-    #                      (eslint-config-next/node_modules/typescript-eslint)
-    #   eslint@10.x     -> TypeError: Error while loading rule
-    #                      'react/display-name': contextOrFilename.getFilename
-    #                      is not a function
-    #
-    # Both fail the `lint` step of this repo's own `verify` script, so the bump
-    # cannot merge while that dependency is in the tree. Tracking upstream:
-    # https://github.com/typescript-eslint/typescript-eslint/issues/10940
-    # Remove these two ignores once `eslint-config-next` ships a copy that
-    # supports them; nothing else is pinned here.
-    ignore:
-      - dependency-name: typescript
-        versions: [">=7"]
-      - dependency-name: eslint
-        versions: [">=10"]
-
   - package-ecosystem: github-actions
     directory: /
     schedule:
