@@ -20,8 +20,11 @@ updates:
   # default branch had already moved past the pin. Bumping that one ref is a
   # manual, reviewed change until eval-lab publishes a tag carrying action.yml.
   #
-  # What actually enforces the pins is `tests/action-pins.test.ts`, run by the
-  # `verify` job in ci.yml — not this comment.
+  # What enforces the pins is `tests/action-pins.test.ts`, run by the `verify`
+  # job in ci.yml, which is a REQUIRED status check on `main` alongside `eval`
+  # (`required_status_checks.contexts == ["eval", "verify"]`, strict) — so an
+  # unpinned ref cannot merge. That is the mechanism; this comment only
+  # describes it.
   - package-ecosystem: github-actions
     directory: /
     schedule:

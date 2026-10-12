@@ -10,12 +10,28 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege, and load-bearing here rather than boilerplate: the `eval`
+# job invokes an action from ANOTHER repository (edgeorgie/eval-lab), which per
+# the comment on that step installs its own CLI at job start. Without this block
+# the job ran on the repository-default GITHUB_TOKEN scope — write, on a repo
+# whose default is read-write — handing a write token to third-party-shaped code
+# on every pull request and every push to main. Pinning the SHA bounds WHICH
+# code runs; only this bounds what that code can do. `contents: read` is all the
+# job needs: it checks out, installs, runs the eval and uploads an artifact.
+permissions:
+  contents: read
+
 jobs:
   eval:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Nothing in this job pushes, so the token does not need to be left
+          # behind in .git/config where any later step (including the
+          # third-party action below) could reuse it.
+          persist-credentials: false
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:

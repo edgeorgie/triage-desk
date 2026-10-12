@@ -7,10 +7,12 @@ name: CI
 # issue text, the path guard, the keystore and the CSP — had never once run in
 # CI and could not fail a pull request.
 #
-# `verify` is intentionally NOT added to the required-status-checks list in the
-# same change that introduces it: the first runs should be observed green on
-# real pull requests before a gate depends on them. Making it required is a
-# follow-up, named in the PR that added this file.
+# `verify` IS a required status check on `main`, alongside `eval`
+# (`required_status_checks.contexts == ["eval", "verify"]`, strict). It was
+# deliberately introduced as non-required so the first runs could be observed
+# green on real pull requests before a merge gate depended on them; that
+# observation is done and the gate is in place, so a pull request that unpins an
+# action ref, floats a container image or breaks a test can no longer merge.
 on:
   pull_request:
   push:
@@ -28,6 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # This job only reads the tree; it never pushes. Not persisting the
+          # token keeps it out of .git/config for every later step.
+          persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
