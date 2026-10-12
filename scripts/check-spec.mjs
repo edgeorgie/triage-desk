@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,51 +10,93 @@ import { fileURLToPath } from "node:url";
 // Why this file is shaped the way it is
 // ---------------------------------------------------------------------------------------------
 //
-// FIVE consecutive rounds of review hardened a hand-written markdown parser here, and every one
-// of them shipped a working bypass. The fifth shipped a REGRESSION: it added NFKC normalisation
-// to stop a confusable deleting a line, applied it BEFORE classifying fences and HTML comments,
-// and so handed an attacker every character that NFKC folds INTO a delimiter — three U+FF40
-// fullwidth grave accents became a ``` fence, and U+FF1C U+FF01 U+FF0D U+FF0D became `<!--`.
-// Those render as ordinary literal text in every markdown renderer, so a document looked
-// completely normal to a human reviewer while the gate treated a chunk of it as commented out
-// and stopped grading it. The attack is caught by the parser one commit earlier and passes the
-// "hardened" one.
+// SIX consecutive rounds of review hardened a hand-written markdown parser here, and every one of
+// them shipped a working bypass. Rounds one to five patched CHARACTERS: whichever delimiter or
+// confusable that round's reviewer used to hide a line was added to a deny-list, and the next
+// reviewer found another. Round six changed the shape of the problem instead, and correctly:
+// `docs/spec/requirements.json` became the source of truth for WHICH requirements exist, so
+// hiding a line of markdown can no longer shrink the gate's subject.
 //
-// The lesson is not that the fifth author was careless. It is that the APPROACH was wrong:
-// discovering which requirements exist by scraping prose headings makes the gate's own subject
-// attacker-controlled, so every round of character-level patching only moves which character
-// deletes a requirement. A gate whose subject can be shrunk cannot witness its own truncation,
-// and the count it prints is derived from the same parse the attack corrupts.
+// Round seven — this change — closes the bypasses round six left behind, and they share one
+// cause that is NOT a character and NOT identity:
 //
-// So identity no longer comes from markdown. `docs/spec/requirements.json` — which already
-// existed in this repository and which this gate never read — is the source of truth for WHICH
-// requirements exist and what each one claims. The three markdown documents are RECONCILED
-// against it rather than parsed for identity. That inverts the failure mode that five rounds
-// could not close: hiding a line in markdown no longer removes a requirement from the gate's
-// subject, it makes the reconciliation fail, because the expected id is declared somewhere the
-// markdown parser cannot reach. Removing a requirement now requires editing structured,
-// machine-readable, git-diffable data.
+//   Round six hardened the IDENTITY layer and left the COLLECTION layer alone.
 //
-// Markdown is still read, for a strictly smaller job: confirming that the documents a human
-// reads say the same thing the structured source says. Two rules make that reading safe:
+// Every grader only ever saw lines that a regex had already decided were rows, and headings that
+// a regex had already decided were headings. The failure mode of those collection regexes was
+// `continue` — silence. So a line that failed to match was not graded at all, while still
+// rendering to a human as a perfectly ordinary contract row or heading. That is the same
+// "invisible to the gate, visible to the reader" inversion the previous five rounds died of,
+// moved one layer outward:
 //
-//   1. Block structure is classified on the RAW line. Normalisation is applied only to the
-//      semantic content of lines that survived classification. A character can therefore never
-//      be folded into a delimiter, which is the root cause of the round-five regression.
-//   2. A requirement id is confined to a strict ASCII allowlist at the identity layer. An id
-//      that is not already its own canonical form — a zero-width joiner inside it, a bidi
-//      override before it, a fullwidth or lowercase spelling of it — is a HARD ERROR naming the
-//      offending text, not a silently different id. Five rounds of "normalise it away" produced
-//      five ways to alias one requirement onto another's proof.
+//   - `| Task 13 Disable CSP | ... |` inside the live first table of tasks.md does not match
+//     `/^\|\s*\S*T-\d/`, so it was never collected and never column-counted, citation-graded or
+//     status-graded. A foreign-repository pull request link and an invented status passed green.
+//   - `### <U+2066>FR-22 ...` did not match the loose `looksLikeRequirementId` pre-filter, so it
+//     was `continue`d. Removing a requirement was loud; PLANTING one was silent. "Reconciliation
+//     is bidirectional" was true only for ids spelled the way the gate expected.
+//
+// The fix is therefore stated as a property of COLLECTION, not of a character set:
+//
+//   1. Every pipe-delimited line inside a table region is a row and is graded. Membership of the
+//      graded set is no longer the attacker's choice. A row whose id cell does not canonicalise
+//      to a plain `T-<n>` / `FR-<n>` is a NAMED error, not an uncollected line. Coverage is still
+//      computed only from the first table — those are two different questions, now computed
+//      separately rather than conflated by one regex.
+//   2. The loose id pre-filter FAILS LOUD. A heading token that folds to `FR` plus a digit under
+//      aggressive folding reaches the strict check and is REPORTED if it does not conform. A
+//      non-ASCII codepoint anywhere in an id token is rejected outright: the allowlist is
+//      `[A-Za-z0-9-]`, so nothing legitimate is lost and no future invisible needs deny-listing.
+//   3. The gate's subject has a PERSISTED witness. A count the gate derives from its own parse
+//      cannot witness that parse being truncated, and after round six the subject is
+//      `requirements.json`, so truncating IT is the attack. `requirements.lock.json` records the
+//      declared id set and its checksum; `spec:check` itself fails on drift, not a unit test.
+//   4. `acceptance` — the substantive content of a requirement — is validated and reconciled in
+//      both directions. Round six certified identity and five metadata fields while the
+//      requirement's MEANING was unguarded: FR-8's CSP allowlist could be rewritten in spec.md to
+//      "any origin" and the gate exited 0.
+//
+// Two rules from round six are preserved verbatim, because they are right and because losing
+// them is how round five shipped a regression:
+//
+//   A. Block structure is classified on the RAW line. Normalisation is applied only to the
+//      semantic content of lines that survived classification, so a character can never be folded
+//      INTO a delimiter.
+//   B. An id that is not already its own canonical form is a HARD ERROR naming the offending
+//      text, never a silently different id.
 
 // ---------------------------------------------------------------------------------------------
 // Identity layer — requirement and task ids, under a strict allowlist
 // ---------------------------------------------------------------------------------------------
 
-/** Zero-width characters, bidi controls, BOM and the soft hyphen: invisible, so never in an id. */
-const INVISIBLE = /[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/g;
+/**
+ * Zero-width characters, bidi controls and separators that are invisible in a renderer.
+ *
+ * This list exists to make an error message READ correctly ("it renders as FR-22"), not to decide
+ * what is accepted. Deciding acceptance by deny-list is what produced five rounds of patches: the
+ * attacker always had one more codepoint. Acceptance is decided by `ASCII_ID`, an allow-list.
+ * U+2066-U+2069 (bidi isolates), U+FE00-U+FE0F (variation selectors), U+180E, U+115F, U+1160,
+ * U+3164 and U+FFA0 are included because a sixth review landed a planted requirement through
+ * U+2066 while this list did not cover it.
+ */
+const INVISIBLE =
+  /[\u00ad\u115f\u1160\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\u3164\ufe00-\ufe0f\ufeff\uffa0]/g;
 /** Combining marks, which can be stacked onto an ASCII letter to alias one id onto another. */
 const COMBINING = /[\u0300-\u036f]/g;
+
+/**
+ * The only characters an id token may contain.
+ *
+ * Note honestly what this does and does not do. At every call site acceptance is
+ * `conforming && REQUIREMENT_ID.test(canonical)` (or `TASK_ID`), and both patterns are anchored
+ * and pure ASCII — so `canonical === token` plus an anchored ASCII pattern ALREADY implies the
+ * token was ASCII. This allowlist is therefore defence in depth, not the operative check, and a
+ * mutation that removes it does not turn the suite red. It is kept because it makes the intent
+ * explicit at the identity layer and because it is what keeps the property true if a future
+ * change ever loosens `REQUIREMENT_ID`; the equivalence is asserted in the suite so this comment
+ * cannot drift from the code. The operative C-1 fix is `looksLikeRequirementId` failing loud.
+ */
+const ASCII_ID = /^[A-Za-z0-9-]+$/;
 
 /** A requirement id, exactly. Anything else is a hard error rather than a different id. */
 const REQUIREMENT_ID = /^FR-[1-9][0-9]*$/;
@@ -61,13 +104,18 @@ const REQUIREMENT_ID = /^FR-[1-9][0-9]*$/;
 const TASK_ID = /^T-[1-9][0-9]*$/;
 
 /**
- * Canonicalise an id token and report whether the token was ALREADY canonical.
+ * Canonicalise an id token and report whether the token was ALREADY canonical AND pure ASCII.
  *
  * `conforming` is the load-bearing half. Earlier rounds normalised a confusable id into the real
  * one, which quietly made `FR-2<ZWJ>2` — a heading that renders as `FR-22` — into a second
  * `FR-2` that inherited the real FR-2's implementation, test, traceability row and task row. A
  * brand-new requirement therefore arrived pre-proven. Canonicalising is only ever used to
  * RECOGNISE that a token was meant to be an id; a token that needed canonicalising is rejected.
+ *
+ * The ASCII clause is the part that stops this being a deny-list. Round six's `conforming` test
+ * was `canonical === token`, which passes for any non-ASCII codepoint that NFKC happens to leave
+ * alone and that no deny-list names — U+2066 was exactly such a codepoint. An id is now required
+ * to be `[A-Za-z0-9-]+` outright, so there is no "next character" to find.
  */
 export function canonicaliseId(token) {
   const canonical = token
@@ -76,7 +124,7 @@ export function canonicaliseId(token) {
     .normalize("NFKC")
     .replace(/[\u2010-\u2015\u2212]/g, "-")
     .toUpperCase();
-  return { canonical, conforming: canonical === token };
+  return { canonical, conforming: canonical === token && ASCII_ID.test(token) };
 }
 
 /** Render a token with its invisible and non-ASCII characters escaped, so an error can name it. */
@@ -89,12 +137,29 @@ function describeToken(token) {
 /**
  * Whether a token was plausibly MEANT to be a requirement id.
  *
- * Deliberately loose, because its job is to catch the near-misses and hand them to the strict
- * check as errors. `fr-22`, `ＦＲ－２２` and `FR-2<ZWJ>2` all reach the strict check and are
- * rejected by name; `Requirements`, `Baseline` and `Non-goals` do not.
+ * This is the pre-filter whose failure mode used to be silence, and that silence was the bug: it
+ * was a loose filter guarding entry into a strict check, so it — not the strict check — was the
+ * real allowlist, and it was attacker-steerable. `/^FR-\d/` over the canonical form failed at
+ * position 0 for `"\u2066FR-22"`, so the heading was `continue`d and the planted requirement was
+ * never reported, while rendering on github.com as `FR-22 Delete any repository the agent can
+ * reach`.
+ *
+ * The detector is therefore AGGRESSIVE and its hits are REPORTED, not skipped. Everything that is
+ * not an ASCII letter or digit is stripped before testing, and `FR` followed by a digit is sought
+ * ANYWHERE in what remains — not just at position 0, which is what a prefixed character defeats.
+ * So every spelling of the id — bidi isolate, zero-width joiner, variation selector, fullwidth,
+ * lowercase, unicode hyphen, Hangul filler, a mathematical-alphanumeric `F` — lands in the strict
+ * check and is rejected BY NAME. Over-matching is the safe direction: a false positive is a loud
+ * error on a heading that should not have been written that way. `Requirements`, `Baseline`,
+ * `Non-goals`, `Open risks` and `Framework` do not match, and that is asserted.
  */
 function looksLikeRequirementId(token) {
-  return /^FR-\d/.test(canonicaliseId(token).canonical);
+  const folded = token
+    .replace(COMBINING, "")
+    .normalize("NFKC")
+    .replace(/[^A-Za-z0-9]/g, "")
+    .toUpperCase();
+  return /FR\d/.test(folded);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -175,7 +240,7 @@ function normaliseContent(text) {
  *
  * Content INSIDE a fenced code block and inside an HTML comment is dropped entirely: it is not
  * document content, so it can neither satisfy a check nor invent a requirement. Comment state is
- * not tracked inside a fence, where `<!--` is literal text.
+ * not tracked inside a fence, where a comment opener is literal text.
  *
  * An unterminated fence or comment is reported rather than silently swallowing the rest of the
  * file.
@@ -203,7 +268,7 @@ export function markdownBlockContext(doc) {
     let line = rawLine;
 
     // Comments are stripped, not skipped by line: skipping the whole line deleted real rows
-    // from the gate's view, and an inline `<!-- -->` was enough to hide a row's cells from the
+    // from the gate's view, and an inline comment was enough to hide a row's cells from the
     // pull-request and status graders entirely.
     if (inComment) {
       const end = line.indexOf("-->");
@@ -282,56 +347,77 @@ function isSeparatorRow(text) {
 }
 
 /**
- * EVERY row in a document matching `rowPattern`, flagged with whether it is in the FIRST table.
+ * EVERY pipe-delimited line inside a table region, flagged with first-table membership.
  *
- * Coverage and shape are different questions and were conflated. A table ends at the first line
- * that is not one of its own rows, which is correct for COVERAGE — an appendix of rejected
- * drafts must not certify anything. But rows below that terminator were not merely uncounted,
- * they were UNGRADED, so a row citing an unrelated repository with the literal status text
- * "NOT A REAL STATUS" passed green while rendering as a perfectly ordinary contract row.
+ * This is the COLLECTION layer, and it is where round six's remaining bypass lived. That version
+ * took a `rowPattern` (`/^\|\s*\S*T-\d/`) and did `if (!rowPattern.test(line.text)) continue;`.
+ * Its invariant was stated as "shape is graded over every MATCHING row" — literally true and
+ * materially misleading, because matching was the attacker's choice. A row reading
+ * `| Task 13 Disable CSP | [#1](https://github.com/attacker/evil/pull/1) | ... | Shipped |`
+ * inside the LIVE first table matched nothing, so it was never collected and therefore received
+ * zero grading: foreign-repository citation and invented status, exit 0, rendering as an ordinary
+ * contract row.
  *
- * So shape is graded over every matching row in the document and coverage is computed only from
- * `inFirstTable` rows. The first table's header is still validated against the columns the
- * checker reads by position, so a table cannot misdescribe its own columns.
+ * There is no row pattern any more. A table region is a run of consecutive content lines that
+ * begin with `|`; every line in it is a row, and the caller grades all of them — including the id
+ * cell, so a row that carries no readable id is itself a named error rather than an uncollected
+ * line.
+ *
+ * Coverage remains a different question and is answered separately, from `inFirstTable` only: an
+ * appendix of rejected drafts must not certify anything.
+ *
+ * Header validation applies to EVERY region, not just the first. A header is recognised the way
+ * markdown recognises one — a row immediately followed by a `|---|---|` separator — so a second
+ * table that misdescribes its own columns is reported instead of being silently graded by the
+ * first table's positional indices. A region with no separator has no header and is all rows.
  */
-function tableRows(ctx, { rowPattern, header, document: documentName, problems }) {
+function tableRows(ctx, { header, document: documentName, problems }) {
   const rows = [];
-  let seenTable = false;
-  let firstTableOpen = true;
-  let headerChecked = false;
+  let region = null;
+  let regionCount = 0;
 
-  for (const line of ctx.lines) {
-    if (line.kind !== "content") {
-      // Blank, fenced and indented-code lines are all block boundaries.
-      if (seenTable) firstTableOpen = false;
-      continue;
-    }
-    if (!line.text.startsWith("|")) {
-      if (seenTable) firstTableOpen = false;
-      continue;
-    }
+  const flush = () => {
+    if (region === null) return;
+    const group = region;
+    region = null;
+    regionCount += 1;
+    const inFirstTable = regionCount === 1;
 
-    if (firstTableOpen && !headerChecked) {
-      seenTable = true;
-      headerChecked = true;
-      const cells = splitRow(line.text);
+    let start = 0;
+    if (group.length >= 2 && isSeparatorRow(group[1].text)) {
+      const cells = splitRow(group[0].text);
       const actual = cells.slice(1, -1).join(" | ");
       const expected = header.join(" | ");
       if (actual !== expected) {
-        problems.push(`${documentName} table header is \`${actual}\`, expected \`${expected}\``);
+        problems.push(
+          `${documentName} table header is \`${actual}\`, expected \`${expected}\` (line ${group[0].number})`,
+        );
       }
+      start = 2;
+    }
+    for (let i = start; i < group.length; i += 1) {
+      const line = group[i];
+      // A stray separator mid-table is formatting noise, not a contract row.
+      if (isSeparatorRow(line.text)) continue;
+      rows.push({
+        cells: splitRow(line.text),
+        rawCells: splitRow(line.raw),
+        number: line.number,
+        inFirstTable,
+        id: null,
+      });
+    }
+  };
+
+  for (const line of ctx.lines) {
+    // Blank, fenced and indented-code lines are block boundaries, and so is any non-pipe content.
+    if (line.kind !== "content" || !line.text.startsWith("|")) {
+      flush();
       continue;
     }
-    seenTable = true;
-    if (isSeparatorRow(line.text)) continue;
-    if (!rowPattern.test(line.text)) continue;
-    rows.push({
-      cells: splitRow(line.text),
-      rawCells: splitRow(line.raw),
-      number: line.number,
-      inFirstTable: firstTableOpen,
-    });
+    (region ??= []).push(line);
   }
+  flush();
   return rows;
 }
 
@@ -348,6 +434,11 @@ const REQUIREMENT_STATUSES = new Set(["Verified", "Implemented, not verified end
  * Returns `null` when the file cannot be trusted as a subject, which is a parser failure and
  * must be said out loud rather than reported as a clean sheet — the same fail-closed rule the
  * markdown readers follow, applied to the document that now decides what the gate is about.
+ *
+ * `acceptance` is validated here, and that is new. Round six validated `title`, `evidence`,
+ * `implementation`, `tests` and `status` and never read `acceptance` at all — zero references in
+ * the whole file — so the field carrying each requirement's actual testable MEANING could be
+ * deleted, emptied, or replaced with the wrong type with no finding.
  */
 export function loadRequirements(json, problems) {
   let parsed;
@@ -390,6 +481,13 @@ export function loadRequirements(json, problems) {
     if (!Array.isArray(entry.implementation) || entry.implementation.length === 0) fieldProblems.push("implementation");
     if (!Array.isArray(entry.tests)) fieldProblems.push("tests");
     if (typeof entry.status !== "string" || !REQUIREMENT_STATUSES.has(entry.status)) fieldProblems.push("status");
+    if (
+      !Array.isArray(entry.acceptance) ||
+      entry.acceptance.length === 0 ||
+      entry.acceptance.some((a) => typeof a !== "string" || a.trim() === "")
+    ) {
+      fieldProblems.push("acceptance");
+    }
     if (fieldProblems.length > 0) {
       problems.push(`${id} in requirements.json has a missing or unreadable ${fieldProblems.join(", ")}`);
       continue;
@@ -400,60 +498,191 @@ export function loadRequirements(json, problems) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The persisted witness for the gate's own subject
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The lock record for a set of declared ids: sorted ids, their count, and their checksum.
+ *
+ * A count a gate derives from the parse under attack cannot witness that parse being truncated.
+ * Round six fixed the DERIVATION (the printed count comes from `requirements.json`, not from the
+ * markdown) and stopped there — but after round six `requirements.json` IS the subject, so
+ * truncating it is the attack. Removing FR-8 coherently from all four documents made the real
+ * gate print `spec check passed: 8 requirements traced` and exit 0. The only thing that caught it
+ * was a bare literal `9` in a unit test, which is an accidental witness: uncommented, inside a
+ * test about something else, and routinely edited to make the suite green.
+ *
+ * So the witness is persisted, outside the subject, and `spec:check` itself fails on drift.
+ * Deleting a requirement now requires a deliberate, reviewable edit to `requirements.lock.json`
+ * in the same commit; it cannot happen as a side effect of editing prose or data.
+ */
+export function declaredIdLock(ids) {
+  const sorted = [...ids].sort();
+  return {
+    count: sorted.length,
+    ids: sorted,
+    sha256: createHash("sha256").update(sorted.join("\n")).digest("hex"),
+  };
+}
+
+/**
+ * Reconcile the declared id set against its persisted lock, naming every id that moved.
+ *
+ * Three independent disagreements are reported, because each catches a different edit: the
+ * checksum catches the lock's own id list being edited without recomputing it, the id set catches
+ * a requirement appearing or disappearing, and the count catches a lock written by hand with a
+ * stale total.
+ */
+export function reconcileDeclaredIds(lockJson, declared, problems) {
+  const LOCK = "requirements.lock.json";
+  let lock;
+  try {
+    lock = JSON.parse(lockJson);
+  } catch (e) {
+    problems.push(`${LOCK} is not valid JSON (${e.message}) — the gate cannot witness truncation of its own subject`);
+    return;
+  }
+  if (
+    lock === null ||
+    typeof lock !== "object" ||
+    !Array.isArray(lock.ids) ||
+    lock.ids.some((i) => typeof i !== "string") ||
+    typeof lock.sha256 !== "string" ||
+    typeof lock.count !== "number"
+  ) {
+    problems.push(
+      `${LOCK} must record a numeric count, an array of ids and a sha256 — the gate has no truncation witness`,
+    );
+    return;
+  }
+
+  const recomputed = declaredIdLock(lock.ids);
+  if (recomputed.sha256 !== lock.sha256) {
+    problems.push(
+      `${LOCK} checksum does not match the id list it records (expected ${recomputed.sha256}, found ${lock.sha256}) — regenerate it with \`npm run spec:lock\``,
+    );
+  }
+  if (lock.count !== lock.ids.length) {
+    problems.push(`${LOCK} records a count of ${lock.count} but lists ${lock.ids.length} ids`);
+  }
+
+  const locked = new Set(lock.ids);
+  const actual = new Set(declared.map((r) => r.id));
+  for (const id of lock.ids) {
+    if (!actual.has(id)) {
+      problems.push(
+        `${id} is recorded in ${LOCK} but is no longer declared in requirements.json — if the removal is deliberate, update ${LOCK} in the same commit`,
+      );
+    }
+  }
+  for (const id of actual) {
+    if (!locked.has(id)) {
+      problems.push(
+        `${id} is declared in requirements.json but is not recorded in ${LOCK} — add it there in the same commit`,
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The three markdown documents, reconciled against the structured source
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Requirement ids declared by a heading in `spec.md`, read at ANY depth and any indentation.
+ * Normalise an acceptance criterion for comparison across the two documents that carry it.
+ *
+ * Inline code backticks and run-length whitespace are presentation, and spec.md legitimately
+ * marks up identifiers that the JSON stores as plain text. Everything else — every word, every
+ * host name in an allowlist — must agree exactly, so "allows scripts and connections from any
+ * origin" can never silently replace a named allowlist.
+ */
+function normaliseCriterion(text) {
+  return text.replace(/`/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Every requirement section declared by a heading in `spec.md`, with its acceptance criteria.
  *
  * This no longer DISCOVERS the gate's subject — `requirements.json` does — so a heading hidden
  * from this function can no longer remove a requirement from grading. What it does is reconcile:
- * the set of headings must equal the set of declared ids, in both directions.
+ * the set of headings must equal the set of declared ids, in both directions, and each section's
+ * title and acceptance criteria must match the structured source.
+ *
+ * The id pre-filter FAILS LOUD (see `looksLikeRequirementId`). A heading whose token folds to
+ * `FR` plus a digit but is not a plain ASCII `FR-<n>` is reported by name rather than skipped,
+ * which is what makes the claim "reconciliation is bidirectional" true for PLANTING as well as
+ * for removal. Round six reported removals and silently ignored plants spelled with any
+ * codepoint its deny-list did not name.
  *
  * A heading inside a fenced code block or an HTML comment does not declare a requirement: it is
  * not document content, so an example in prose cannot invent one. A heading inside an INDENTED
  * code block does, deliberately — indentation is never a way to remove a requirement.
  *
- * A heading whose id token is not already canonical ASCII is a hard error naming the token.
+ * A section's ACCEPTANCE CRITERIA are the first contiguous run of `-` bullets inside it. That
+ * boundary is a stated contract rather than a guess: it is what lets FR-9 carry a `Non-goals:`
+ * list after its criteria without the two being conflated.
  */
-export function requirementIds(spec, problems = []) {
-  const ids = [];
+export function specRequirementSections(spec, problems = []) {
+  const sections = [];
+  let current = null;
+  let bulletsClosed = false;
+
   for (const line of markdownBlockContext(spec).lines) {
     if (line.kind !== "content" && line.kind !== "code") continue;
-    // Read from the RAW text: the point is to SEE the confusable, not to fold it away.
-    const m = line.raw.match(/^#+\s+(\S+)/);
-    if (!m) continue;
-    const token = m[1];
-    if (!looksLikeRequirementId(token)) continue;
-    const { canonical, conforming } = canonicaliseId(token);
-    if (!conforming || !REQUIREMENT_ID.test(canonical)) {
-      problems.push(
-        `spec.md line ${line.number} declares a requirement id "${describeToken(token)}", which is not a plain \`FR-<n>\` id — it renders as ${canonical} but is not that id`,
-      );
+
+    // Read the token from the RAW text: the point is to SEE the confusable, not to fold it away.
+    const heading = line.raw.match(/^#+\s+(\S+)/);
+    if (heading) {
+      current = null;
+      bulletsClosed = false;
+      const token = heading[1];
+      if (!looksLikeRequirementId(token)) continue;
+      const { canonical, conforming } = canonicaliseId(token);
+      if (!conforming || !REQUIREMENT_ID.test(canonical)) {
+        problems.push(
+          `spec.md line ${line.number} declares a requirement id "${describeToken(token)}", which is not a plain \`FR-<n>\` id — it renders as ${canonical} but is not that id`,
+        );
+        continue;
+      }
+      // The TITLE is read from the normalised text, and only from the heading line itself.
+      const titled = line.text.match(/^#+\s+\S+\s*([\s\S]*)$/);
+      current = { id: canonical, title: (titled?.[1] ?? "").trim(), line: line.number, acceptance: [] };
+      sections.push(current);
       continue;
     }
-    ids.push(canonical);
+
+    if (current === null || bulletsClosed) continue;
+    const bullet = line.text.match(/^[-*]\s+([\s\S]*)$/);
+    if (bullet) {
+      current.acceptance.push({ text: bullet[1].trim(), line: line.number });
+      continue;
+    }
+    if (current.acceptance.length > 0) bulletsClosed = true;
   }
-  return ids;
+
+  return sections;
+}
+
+/** Requirement ids declared by a heading in `spec.md`, in document order. */
+export function requirementIds(spec, problems = []) {
+  return specRequirementSections(spec, problems).map((s) => s.id);
 }
 
 const TRACE_HEADER = ["Requirement", "Implementation", "Tests", "Evidence", "Status"];
 const TASKS_HEADER = ["Task", "Pull request", "Branch", "Requirements", "Status"];
 
-/** Every `FR-n` row in traceability.md, flagged with first-table membership. */
+/** Every row of every table in traceability.md, flagged with first-table membership. */
 export function traceabilityRows(trace, problems = []) {
   return tableRows(markdownBlockContext(trace), {
-    rowPattern: /^\|\s*\S*FR-\d/,
     header: TRACE_HEADER,
     document: "traceability.md",
     problems,
   });
 }
 
-/** Every `T-n` row in tasks.md, flagged with first-table membership. */
+/** Every row of every table in tasks.md, flagged with first-table membership. */
 export function taskTableRows(tasks, problems = []) {
   return tableRows(markdownBlockContext(tasks), {
-    rowPattern: /^\|\s*\S*T-\d/,
     header: TASKS_HEADER,
     document: "tasks.md",
     problems,
@@ -513,13 +742,17 @@ const DELIVERED_STATUSES = new Set(["Merged"]);
  * Reads the RAW cell so a zero-width joiner or a bidi override is named rather than folded. The
  * aliasing this prevents is the serious one: an id that renders as a new requirement but parses
  * as an existing one inherits that requirement's implementation, test and evidence.
+ *
+ * This now runs over EVERY row in a table region, not only over rows a pattern already accepted.
+ * A row whose first cell reads `Task 13 Disable CSP` is a row with an unreadable id — a named
+ * error — rather than a line the gate never saw.
  */
 function rowId(row, pattern, documentName, problems) {
   const token = (row.rawCells[ID_INDEX] ?? "").split(/\s+/)[0] ?? "";
   const { canonical, conforming } = canonicaliseId(token);
   if (!conforming || !pattern.test(canonical)) {
     problems.push(
-      `${documentName} line ${row.number} has the id "${describeToken(token)}", which is not a plain \`${pattern === REQUIREMENT_ID ? "FR" : "T"}-<n>\` id`,
+      `${documentName} line ${row.number} is a table row whose id is "${describeToken(token)}", which is not a plain \`${pattern === REQUIREMENT_ID ? "FR" : "T"}-<n>\` id`,
     );
     return null;
   }
@@ -529,10 +762,25 @@ function rowId(row, pattern, documentName, problems) {
 /**
  * Every problem found across the structured source and the three documents it describes.
  *
- * `requirements` is the JSON text of `docs/spec/requirements.json`. `exists` is injected so
- * tests can describe a filesystem without touching one.
+ * `requirements` is the JSON text of `docs/spec/requirements.json` and `lock` the JSON text of
+ * `docs/spec/requirements.lock.json`. `exists` is injected so tests can describe a filesystem
+ * without touching one.
+ *
+ * The parameter types are declared rather than inferred: `lock = null` alone makes the checker
+ * infer `null` as the whole type of the parameter, so every real caller passing lock text becomes
+ * a type error. `lock` is optional because unit tests exercise the other checks without building a
+ * lock; the real entry point always passes one, and a missing lock is itself reported.
+ *
+ * @param {object} input
+ * @param {string} input.requirements
+ * @param {string} [input.lock]
+ * @param {string} input.spec
+ * @param {string} input.trace
+ * @param {string} input.tasks
+ * @param {(path: string) => boolean} [input.exists]
+ * @returns {string[]}
  */
-export function checkSpec({ requirements, spec, trace, tasks, exists = existsSync }) {
+export function checkSpec({ requirements, lock = null, spec, trace, tasks, exists = existsSync }) {
   const problems = [];
 
   problems.push(...blockStructureProblems("spec.md", markdownBlockContext(spec)));
@@ -542,17 +790,25 @@ export function checkSpec({ requirements, spec, trace, tasks, exists = existsSyn
   const declared = loadRequirements(requirements, problems);
   if (declared === null) return problems;
 
+  // The persisted truncation witness, checked before anything derived from the subject, so a
+  // coherent deletion is reported even when every document agrees with itself afterwards.
+  if (typeof lock !== "string") {
+    problems.push("requirements.lock.json was not read — the gate has no witness for its own subject");
+  } else {
+    reconcileDeclaredIds(lock, declared, problems);
+  }
+
   const byId = new Map(declared.map((r) => [r.id, r]));
   const ids = [...byId.keys()];
 
   // --- spec.md: the prose must declare exactly the requirements the source of truth declares --
   //
-  // Both directions matter. A heading hidden by any construct whatsoever now shows up as a
-  // declared requirement with no heading, which is the loud direction — the five previous rounds
-  // all failed in the quiet one, where the requirement simply left the gate's subject.
-  const headings = requirementIds(spec, problems);
+  // Both directions matter, and both are now loud. A heading hidden by any construct whatsoever
+  // shows up as a declared requirement with no heading; a heading PLANTED with any spelling the
+  // strict allowlist rejects shows up as a named id error rather than being skipped.
+  const sections = specRequirementSections(spec, problems);
   const headingCounts = new Map();
-  for (const id of headings) headingCounts.set(id, (headingCounts.get(id) ?? 0) + 1);
+  for (const s of sections) headingCounts.set(s.id, (headingCounts.get(s.id) ?? 0) + 1);
   for (const id of ids) {
     const n = headingCounts.get(id) ?? 0;
     if (n === 0) {
@@ -564,15 +820,37 @@ export function checkSpec({ requirements, spec, trace, tasks, exists = existsSyn
   for (const id of headingCounts.keys()) {
     if (!byId.has(id)) problems.push(`spec.md declares ${id}, which requirements.json does not`);
   }
-  for (const r of declared) {
-    // The heading's title is reconciled too, so the two sources cannot drift into describing
-    // different requirements under the same id.
-    const want = `${r.id} ${r.title}`;
-    const found = markdownBlockContext(spec).lines.some(
-      (l) => (l.kind === "content" || l.kind === "code") && l.text.replace(/^#+\s+/, "") === want,
-    );
-    if (!found && headingCounts.has(r.id)) {
-      problems.push(`${r.id}'s heading in spec.md does not match its requirements.json title "${r.title}"`);
+
+  for (const s of sections) {
+    const r = byId.get(s.id);
+    if (!r) continue;
+
+    // The title is anchored to THE heading line found for this id. Round six searched every
+    // content line for `l.text.replace(/^#+\s+/, "") === want`, and the `replace` was optional,
+    // so any bare prose line matched just as well: renaming a heading and adding a decoy
+    // paragraph carrying the old title passed green.
+    if (s.title !== r.title) {
+      problems.push(
+        `${s.id}'s heading in spec.md does not match its requirements.json title "${r.title}" — line ${s.line} reads "${s.title}"`,
+      );
+    }
+
+    // Acceptance criteria, reconciled in both directions and in order. This is the requirement's
+    // substance: round six read this field NOWHERE, so FR-8's CSP allowlist could be rewritten in
+    // spec.md to permit any origin and the gate exited 0.
+    const got = s.acceptance.map((a) => normaliseCriterion(a.text));
+    const want = r.acceptance.map(normaliseCriterion);
+    if (got.length !== want.length) {
+      problems.push(
+        `${s.id} has ${got.length} acceptance criteria under its heading in spec.md but ${want.length} in requirements.json`,
+      );
+    }
+    for (let i = 0; i < Math.min(got.length, want.length); i += 1) {
+      if (got[i] !== want[i]) {
+        problems.push(
+          `${s.id}'s acceptance criterion ${i + 1} in spec.md (line ${s.acceptance[i].line}) does not match requirements.json: spec.md says "${got[i]}", requirements.json says "${want[i]}"`,
+        );
+      }
     }
   }
 
@@ -587,7 +865,8 @@ export function checkSpec({ requirements, spec, trace, tasks, exists = existsSyn
     problems.push("traceability.md parsed to zero requirement rows — the coverage check cannot run");
   }
 
-  // Shape is graded over EVERY row in the document, inside the first table or not.
+  // Shape is graded over EVERY row in EVERY table region — including the id cell, which is what
+  // stops a row opting out of grading by not looking like one.
   for (const row of traceRows) {
     if (row.cells.length !== EXPECTED_CELLS) {
       problems.push(
@@ -595,6 +874,7 @@ export function checkSpec({ requirements, spec, trace, tasks, exists = existsSyn
       );
       continue;
     }
+    row.id = rowId(row, REQUIREMENT_ID, "traceability.md", problems);
     const status = row.cells[STATUS_INDEX];
     if (!REQUIREMENT_STATUSES.has(status)) {
       problems.push(
@@ -603,10 +883,11 @@ export function checkSpec({ requirements, spec, trace, tasks, exists = existsSyn
     }
   }
 
+  // Coverage comes only from the first table.
   const seenTrace = new Set();
   for (const row of traceFirst) {
     if (row.cells.length !== EXPECTED_CELLS) continue;
-    const id = rowId(row, REQUIREMENT_ID, "traceability.md", problems);
+    const id = row.id;
     if (id === null) continue;
     if (seenTrace.has(id)) {
       problems.push(`${id} has more than one row in traceability.md — remove the duplicate`);
@@ -668,15 +949,17 @@ export function checkSpec({ requirements, spec, trace, tasks, exists = existsSyn
   const taskRows = taskTableRows(tasks, problems);
   const taskFirst = taskRows.filter((r) => r.inFirstTable);
 
-  // Shape over EVERY row in the document. This is the F4 fix: rows past the table terminator
-  // used to be parsed and then never graded, so a row citing an unrelated repository with a
-  // status outside the closed enum passed green while rendering as an ordinary contract row.
+  // Shape over EVERY row in EVERY table region, id cell included. The row that defeated round
+  // six — `| Task 13 Disable CSP | [#1](https://github.com/attacker/evil/pull/1) | ... |` inside
+  // the LIVE first table — is now three named findings rather than silence.
   for (const row of taskRows) {
     const cells = row.cells;
     if (cells.length !== EXPECTED_CELLS) {
       problems.push(`a tasks.md work item has ${cells.length - 2} columns, expected 5: ${cells[TASK_INDEX]}`);
       continue;
     }
+
+    row.id = rowId(row, TASK_ID, "tasks.md", problems);
 
     // Scope, stated honestly: this grades a citation's SHAPE, not its truth. A self-consistent
     // citation of the wrong pull request still passes; only a human or a network call can catch
@@ -710,7 +993,7 @@ export function checkSpec({ requirements, spec, trace, tasks, exists = existsSyn
   const claimedBy = new Map();
   for (const row of taskFirst) {
     if (row.cells.length !== EXPECTED_CELLS) continue;
-    if (rowId(row, TASK_ID, "tasks.md", problems) === null) continue;
+    if (row.id === null) continue;
     const claims = requirementClaims(row.rawCells[REQUIREMENTS_INDEX]);
     if (claims === null) {
       problems.push(
@@ -751,19 +1034,22 @@ export function checkSpec({ requirements, spec, trace, tasks, exists = existsSyn
 // fooled by how the script was invoked.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const requirements = readFileSync("docs/spec/requirements.json", "utf8");
+  const lock = readFileSync("docs/spec/requirements.lock.json", "utf8");
   const spec = readFileSync("docs/spec/spec.md", "utf8");
   const trace = readFileSync("docs/spec/traceability.md", "utf8");
   const tasks = readFileSync("docs/spec/tasks.md", "utf8");
 
-  const problems = checkSpec({ requirements, spec, trace, tasks });
+  const problems = checkSpec({ requirements, lock, spec, trace, tasks });
   if (problems.length > 0) {
     console.error(problems.map((p) => "- " + p).join("\n"));
     process.exit(1);
   }
   // The count is read from the structured source of truth, not derived from the markdown parse
-  // that an attack would corrupt. A gate that computes its own count from the parse under attack
-  // cannot witness its own truncation: five rounds of review watched this number move 9 -> 8
-  // while the gate printed "passed".
+  // that an attack would corrupt — AND the structured source is itself reconciled against the
+  // persisted lock above, so a coherent deletion of a requirement from every document on disk
+  // fails this gate instead of printing a quietly smaller number.
   const declared = loadRequirements(requirements, []);
-  console.log(`spec check passed: ${declared.length} requirements traced (from docs/spec/requirements.json)`);
+  console.log(
+    `spec check passed: ${declared.length} requirements traced (from docs/spec/requirements.json, witnessed by docs/spec/requirements.lock.json)`,
+  );
 }

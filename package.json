@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "spec:check": "node scripts/check-spec.mjs",
+    "spec:lock": "node scripts/write-spec-lock.mjs",
     "verify": "npm run typecheck && npm run lint && npm run spec:check && npm test && npm run build",
     "deploy:pages": "node scripts/deploy-pages.mjs",
     "triage-bot": "node --experimental-strip-types scripts/triage-bot.ts"
