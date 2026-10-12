@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # The reason this repo needs the github-actions ecosystem specifically, not
+  # just npm: `.github/workflows/eval.yml` consumes `edgeorgie/eval-lab`, a
+  # first-party action, and `eval` is this repo's ONLY required status check.
+  # That reference used to be `@main`, which meant a push to another repository
+  # silently redefined this repo's merge gate with no diff and no review here.
+  # It is now pinned to a commit SHA (see the comment at that step), and this
+  # block is what keeps the pin from going stale: Dependabot opens a reviewable
+  # PR when the upstream action moves, instead of the ref tracking it blindly.
+  #
+  # `tests/action-pins.test.ts` enforces the pin itself — it reads every
+  # workflow at runtime and fails on any mutable ref, so a new workflow cannot
+  # arrive unchecked and this comment cannot become the only thing holding the
+  # invariant.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

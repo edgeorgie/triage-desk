@@ -27,7 +27,17 @@ jobs:
 
       - name: Run eval-lab against triage-desk's heuristic triage logic
         id: eval
-        uses: edgeorgie/eval-lab@main
+        # Pinned to a commit SHA, not `@main`. `eval` is this repo's ONLY
+        # required status check, and this step is what decides it — so with a
+        # mutable ref, any push to eval-lab silently redefined triage-desk's
+        # merge gate with zero diff here and no review in this repo. The tag
+        # `v0.1.0` is not an option: it predates `action.yml` existing at all
+        # (added in eval-lab #21, 2026-10-09), so `@v0.1.0` resolves to a tree
+        # with no action to run.
+        #
+        # Bumping this is a reviewed one-line PR, and Dependabot's
+        # `github-actions` ecosystem (.github/dependabot.yml) opens it.
+        uses: edgeorgie/eval-lab@2ce08e791884cd9d65835b25da7f46831cd9a2ee # main as of 2026-10-11
         with:
           config: eval.config.json
           model: exec
@@ -39,7 +49,7 @@ jobs:
             echo "eval-lab reported a failure against triage-desk's heuristic triage cases."
             exit 1
           fi
-          echo "Confirmed: eval-lab (edgeorgie/eval-lab@main) ran triage-desk's real heuristic triage logic and all cases passed."
+          echo "Confirmed: eval-lab ran triage-desk's real heuristic triage logic and all cases passed."
 
       - name: Upload eval run artifact
         if: always()
