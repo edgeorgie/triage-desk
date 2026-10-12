@@ -15,10 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
@@ -35,8 +34,15 @@ jobs:
         # (added in eval-lab #21, 2026-10-09), so `@v0.1.0` resolves to a tree
         # with no action to run.
         #
-        # Bumping this is a reviewed one-line PR, and Dependabot's
-        # `github-actions` ecosystem (.github/dependabot.yml) opens it.
+        # Bumping this is a MANUAL reviewed change. Dependabot does not cover
+        # it: the pin is an untagged commit, which its docs describe as the
+        # "track the latest commit" case rather than a version bump, and it was
+        # observed opening PRs for the `actions/*` pins here while opening none
+        # for eval-lab. Tag a release in eval-lab to change that.
+        #
+        # The pin bounds what this repo resolves, not everything that executes:
+        # the pinned action installs its own CLI at job start, so eval-lab's own
+        # supply chain is upstream's to harden.
         uses: edgeorgie/eval-lab@2ce08e791884cd9d65835b25da7f46831cd9a2ee # main as of 2026-10-11
         with:
           config: eval.config.json
@@ -53,7 +59,7 @@ jobs:
 
       - name: Upload eval run artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: eval-lab-run
           path: eval-run.json

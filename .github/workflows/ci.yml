@@ -1,0 +1,43 @@
+name: CI
+
+# This repo had NO workflow that ran its own test suite. `eval.yml` runs
+# eval-lab against the triage heuristics and `triage.yml` runs the bot; neither
+# invokes `npm test`. Branch protection requires exactly one check (`eval`), so
+# every test under `tests/` — including the security tests covering untrusted
+# issue text, the path guard, the keystore and the CSP — had never once run in
+# CI and could not fail a pull request.
+#
+# `verify` is intentionally NOT added to the required-status-checks list in the
+# same change that introduces it: the first runs should be observed green on
+# real pull requests before a gate depends on them. Making it required is a
+# follow-up, named in the PR that added this file.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Next generates the `LayoutProps`/`PageProps` types that files under
+      # `app/` reference, so typegen must precede `tsc --noEmit` or the
+      # typecheck dies on a missing name rather than a real type error.
+      - run: npx next typegen
+      # typecheck -> lint -> spec:check -> test -> build, as defined by the
+      # repo's own `verify` script rather than restated here, so this workflow
+      # cannot drift from what a developer runs locally.
+      - run: npm run verify
