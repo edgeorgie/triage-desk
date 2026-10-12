@@ -29,6 +29,19 @@ function githubYamlFiles(dir: string = GITHUB_DIR, out: string[] = []): string[]
 }
 
 /**
+ * The slice of a workflow/action document this guard reads. Deliberately
+ * minimal and `unknown`-valued rather than `any`: every field is validated at
+ * the point of use below, so a malformed document is rejected by the checks
+ * rather than silently trusted by a cast.
+ */
+type Step = { uses?: unknown };
+type Job = { uses?: unknown; steps?: unknown };
+type GithubYamlDoc = { jobs?: Record<string, unknown>; runs?: { steps?: unknown } };
+
+const asSteps = (value: unknown): Step[] =>
+  Array.isArray(value) ? value.filter((s): s is Step => !!s && typeof s === "object") : [];
+
+/**
  * Every action/workflow reference in the repo, found by loading each file with
  * a real YAML parser and walking the document.
  *
@@ -45,6 +58,7 @@ function githubYamlFiles(dir: string = GITHUB_DIR, out: string[] = []): string[]
  *   - `jobs.<id>.uses`          — a reusable WORKFLOW call, at job level
  *   - `runs.steps[].uses`       — a step inside a local composite action
  */
+
 function actionReferences(): { where: string; ref: string }[] {
   const files = githubYamlFiles();
   assert.ok(files.length > 0, `no YAML files found under ${GITHUB_DIR}`);
@@ -52,32 +66,30 @@ function actionReferences(): { where: string; ref: string }[] {
   const refs: { where: string; ref: string }[] = [];
   for (const file of files) {
     const where = relative(REPO_ROOT, file);
-    let doc: any;
+    let doc: unknown;
     try {
       doc = loadYaml(readFileSync(file, "utf8"));
-    } catch (cause: any) {
+    } catch (cause) {
       // A file we cannot parse is not a file we can clear. Fail, rather than
       // skipping it and reporting the remaining set as clean.
-      assert.fail(`${where} did not parse as YAML: ${cause.message}`);
+      assert.fail(`${where} did not parse as YAML: ${(cause as Error).message}`);
     }
     if (!doc || typeof doc !== "object") continue;
+    const parsed = doc as GithubYamlDoc;
 
     const push = (ref: unknown, at: string) => {
       if (typeof ref === "string" && ref.length > 0) refs.push({ where: `${where} ${at}`, ref });
     };
 
-    for (const [id, job] of Object.entries<any>(doc.jobs ?? {})) {
-      if (!job || typeof job !== "object") continue;
+    for (const [id, value] of Object.entries(parsed.jobs ?? {})) {
+      if (!value || typeof value !== "object") continue;
+      const job = value as Job;
       push(job.uses, `jobs.${id}.uses`); // reusable workflow call
-      (Array.isArray(job.steps) ? job.steps : []).forEach((step: any, i: number) => {
-        if (step && typeof step === "object") push(step.uses, `jobs.${id}.steps[${i}]`);
-      });
+      asSteps(job.steps).forEach((step, i) => push(step.uses, `jobs.${id}.steps[${i}]`));
     }
 
-    const runSteps = doc.runs?.steps;
-    (Array.isArray(runSteps) ? runSteps : []).forEach((step: any, i: number) => {
-      if (step && typeof step === "object") push(step.uses, `runs.steps[${i}]`);
-    });
+    const runSteps = parsed.runs?.steps;
+    asSteps(runSteps).forEach((step, i) => push(step.uses, `runs.steps[${i}]`));
   }
   return refs;
 }
@@ -170,14 +182,14 @@ test("the parser sees uses: in every YAML spelling a regex would miss", () => {
   };
 
   for (const [label, text] of Object.entries(spellings)) {
-    const doc: any = loadYaml(text);
+    const doc = loadYaml(text) as GithubYamlDoc;
     const found: string[] = [
-      ...Object.values<any>(doc.jobs ?? {}).flatMap((j: any) => [
-        j.uses,
-        ...(Array.isArray(j.steps) ? j.steps.map((s: any) => s.uses) : []),
-      ]),
-      ...(Array.isArray(doc.runs?.steps) ? doc.runs.steps.map((s: any) => s.uses) : []),
-    ].filter(Boolean);
+      ...Object.values(doc.jobs ?? {}).flatMap((value) => {
+        const job = (value ?? {}) as Job;
+        return [job.uses, ...asSteps(job.steps).map((s) => s.uses)];
+      }),
+      ...asSteps(doc.runs?.steps).map((s) => s.uses),
+    ].filter((r): r is string => typeof r === "string");
 
     const expected =
       label === "reusable workflow at job level"
