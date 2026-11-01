@@ -59,7 +59,7 @@ jobs:
         # The pin bounds what this repo resolves, not everything that executes:
         # the pinned action installs its own CLI at job start, so eval-lab's own
         # supply chain is upstream's to harden.
-        uses: edgeorgie/eval-lab@2ce08e791884cd9d65835b25da7f46831cd9a2ee # main as of 2026-10-11
+        uses: edgeorgie/eval-lab@717af50f6395fccbbdd69fb1aa6f8967e8225bca # main as of 2026-10-11
         with:
           config: eval.config.json
           model: exec
